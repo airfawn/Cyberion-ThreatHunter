@@ -1,0 +1,5 @@
+# Core UI framework
+PyQt5>=5.15
+
+# Optional test runner (used in `tests/test_collector.py`)
+pytest>=7.0
