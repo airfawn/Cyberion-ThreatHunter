@@ -16,8 +16,8 @@ class ServerThread(threading.Thread):
                  event_queue: Queue,
                  status_callback=None):
         super().__init__(daemon=True)
-        self.host = host
-        self.port = port
+        self.host = "192.168.1.10"
+        self.port = 9090
         self.event_queue = event_queue
         self.status_cb = status_callback or (lambda s: None)
 

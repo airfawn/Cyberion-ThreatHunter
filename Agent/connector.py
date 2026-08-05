@@ -3,7 +3,7 @@ import threading
 import time
 
 class connector:
-    def __init__(self, server_ip="localhost", server_port=12345):
+    def __init__(self, server_ip="192.168.1.10", server_port=9090):
         self.server_ip = server_ip
         self.server_port = server_port
         self.socket = None
