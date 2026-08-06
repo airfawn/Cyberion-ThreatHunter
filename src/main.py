@@ -16,7 +16,9 @@ from PyQt5.QtGui import QFont, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -29,6 +31,7 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QTabBar,
     QTableView,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -47,6 +50,79 @@ SETTINGS_FILE = "cyberion_settings.json"
 
 class AgentStatusSignal(QObject):
     status_changed = pyqtSignal(str)
+
+
+class EventDetailsDialog(QDialog):
+    """Shows every field of a single event plus its original raw JSON."""
+
+    def __init__(self, event: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Event Details")
+        self.setMinimumSize(560, 420)
+        self.resize(680, 500)
+        # raw_message holds the exact JSON received from the agent
+        # (the server sets it to json.dumps() of the incoming message/log entry).
+        self.raw_json = str(event.get("raw_message", ""))
+
+        layout = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setColumnStretch(1, 1)
+        row = 0
+        for key, value in event.items():
+            if key == "raw_message":
+                continue
+            name_lbl = QLabel(key.replace("_", " ").title())
+            name_lbl.setStyleSheet("color: #9aa0a6;")
+            name_lbl.setWordWrap(True)
+            value_lbl = QLabel("" if value is None else str(value))
+            value_lbl.setWordWrap(True)
+            value_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(name_lbl, row, 0, Qt.AlignTop)
+            grid.addWidget(value_lbl, row, 1)
+            row += 1
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        btn_row = QHBoxLayout()
+        raw_btn = QPushButton("View Raw JSON")
+        raw_btn.clicked.connect(self._show_raw_json)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(raw_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _pretty_raw_json(self) -> str:
+        """Return the original raw JSON pretty-printed with indentation."""
+        try:
+            parsed = json.loads(self.raw_json)
+            return json.dumps(parsed, indent=2, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            return self.raw_json
+
+    def _show_raw_json(self):
+        """Display the original raw JSON payload, pretty-printed with indentation."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Raw JSON")
+        dialog.resize(700, 540)
+        lay = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setFont(QFont("Menlo", 11))
+        text.setPlainText(self._pretty_raw_json())
+        lay.addWidget(text, 1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+        dialog.exec_()
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -102,16 +178,19 @@ class MainWindow(QMainWindow):
             ("user", "User"),
             ("ip_address", "IP Address"),
             ("message", "Message"),
+            ("raw_message", "Raw Message"),
         ]
         self.default_selected_fields = {"timestamp", "source", "event_type", "message"}
         self.selected_fields = set(self.default_selected_fields)
         self.field_checkboxes: dict[str, QCheckBox] = {}
+        self.fields_layout: QVBoxLayout | None = None
+        self.known_fields: set[str] = {key for key, _ in self.available_fields}
 
         self.events: list[dict[str, str]] = []
         self.event_counter = 0
         self.search_query = ""
 
-        self.event_queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue()
+        self.event_queue: "queue.Queue[tuple[str, str, str, str, dict[str, str]]]" = queue.Queue()
         self.db = EventDB()
 
         self.socket_message_queue: "queue.Queue[str]" = queue.Queue()
@@ -195,20 +274,20 @@ class MainWindow(QMainWindow):
         fields_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         fields_scroll.setMinimumHeight(220)
 
-        fields_widget = QWidget()
-        fields_layout = QVBoxLayout(fields_widget)
-        fields_layout.setContentsMargins(6, 6, 6, 6)
-        fields_layout.setSpacing(6)
+        self.fields_widget = QWidget()
+        self.fields_layout = QVBoxLayout(self.fields_widget)
+        self.fields_layout.setContentsMargins(6, 6, 6, 6)
+        self.fields_layout.setSpacing(6)
 
         for key, label in self.available_fields:
             checkbox = QCheckBox(label)
             checkbox.setChecked(key in self.selected_fields)
             checkbox.stateChanged.connect(self._on_field_selector_changed)
-            fields_layout.addWidget(checkbox)
+            self.fields_layout.addWidget(checkbox)
             self.field_checkboxes[key] = checkbox
 
-        fields_layout.addStretch(1)
-        fields_scroll.setWidget(fields_widget)
+        self.fields_layout.addStretch(1)
+        fields_scroll.setWidget(self.fields_widget)
         side_layout.addWidget(fields_scroll)
 
         side_layout.addSpacing(8)
@@ -284,6 +363,7 @@ class MainWindow(QMainWindow):
         self.table_view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
         self.table_view.setVerticalScrollMode(QTableView.ScrollPerPixel)
         self.table_view.horizontalHeader().setStretchLastSection(False)
+        self.table_view.clicked.connect(self._on_table_clicked)
         layout.addWidget(self.table_view, 1)
 
         self.messages_display = QListWidget()
@@ -452,7 +532,27 @@ class MainWindow(QMainWindow):
         )
         self.server_thread.start()
 
-    def _normalize_event(self, received_at: str, source: str, raw_event: str) -> dict[str, str]:
+    def _normalize_event(
+        self,
+        received_at: str,
+        source: str,
+        raw_event: str,
+        raw_message: str = "",
+        structured: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        if structured is not None:
+            result = dict(structured)
+            result["raw_message"] = raw_message or raw_event
+            if "source" not in result or not result["source"]:
+                result["source"] = source
+            if "timestamp" not in result or not result["timestamp"]:
+                result["timestamp"] = received_at
+            for key, value in result.items():
+                if key not in self.known_fields:
+                    self.known_fields.add(key)
+                    self._add_new_field(key, key.replace("_", " ").title())
+            return result
+
         payload = {}
         if isinstance(raw_event, str):
             try:
@@ -472,7 +572,7 @@ class MainWindow(QMainWindow):
         if not message:
             message = raw_event
 
-        return {
+        normalized = {
             "timestamp": str(payload.get("timestamp", received_at)) if isinstance(payload, dict) else received_at,
             "source": str(payload.get("source", source)) if isinstance(payload, dict) else source,
             "event_type": str(event_type),
@@ -481,7 +581,18 @@ class MainWindow(QMainWindow):
             "user": str(user),
             "ip_address": str(ip_address),
             "message": str(message),
+            "raw_message": raw_message or raw_event,
         }
+
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key not in normalized and key not in {"timestamp", "source", "raw_event", "message"}:
+                    normalized[key] = str(value)
+                    if key not in self.known_fields:
+                        self.known_fields.add(key)
+                        self._add_new_field(key, key.replace("_", " ").title())
+
+        return normalized
 
     def _selected_field_keys(self) -> list[str]:
         return [key for key, _label in self.available_fields if key in self.selected_fields]
@@ -532,6 +643,10 @@ class MainWindow(QMainWindow):
                 self.table_view.setColumnWidth(idx, 130)
             elif key == "message":
                 self.table_view.setColumnWidth(idx, 400)
+            elif key == "raw_message":
+                self.table_view.setColumnWidth(idx, 500)
+            else:
+                self.table_view.setColumnWidth(idx, 150)
 
     def _on_field_selector_changed(self):
         selected = {key for key, cb in self.field_checkboxes.items() if cb.isChecked()}
@@ -546,9 +661,30 @@ class MainWindow(QMainWindow):
         self.selected_fields = selected
         self._refresh_table()
 
+    def _add_new_field(self, key: str, label: str):
+        """Add a newly discovered field to the sidebar and available fields."""
+        if key in self.field_checkboxes:
+            return
+        checkbox = QCheckBox(label)
+        checkbox.setChecked(False)
+        checkbox.stateChanged.connect(self._on_field_selector_changed)
+
+        if self.fields_layout is not None:
+            self.fields_layout.insertWidget(self.fields_layout.count() - 1, checkbox)
+            self.field_checkboxes[key] = checkbox
+            self.available_fields.append((key, label))
+
     def _on_search_changed(self, text: str):
         self.search_query = text
         self._refresh_table()
+
+    def _on_table_clicked(self, index):
+        """Open the Event Details view for the exact event in the clicked row."""
+        events = self._filtered_events()
+        if index.row() < 0 or index.row() >= len(events):
+            return
+        event = events[index.row()]
+        EventDetailsDialog(event, self).exec_()
 
     def _set_connection_status(self, status: str):
         normalized = status.strip()
@@ -568,9 +704,16 @@ class MainWindow(QMainWindow):
         table_needs_update = False
         while not self.event_queue.empty():
             try:
-                received_at, source, raw_event = self.event_queue.get_nowait()
+                queue_item = self.event_queue.get_nowait()
             except queue.Empty:
                 break
+
+            if len(queue_item) == 5:
+                received_at, source, raw_event, raw_message, structured = queue_item
+            else:
+                received_at, source, raw_event = queue_item
+                raw_message = raw_event
+                structured = None
 
             try:
                 self.db.insert_event(received_at, source, raw_event)
@@ -578,7 +721,9 @@ class MainWindow(QMainWindow):
                 print("DB insert error:", exc)
                 continue
 
-            self.events.append(self._normalize_event(received_at, source, raw_event))
+            self.events.append(
+                self._normalize_event(received_at, source, raw_event, raw_message, structured)
+            )
             self.event_counter += 1
             table_needs_update = True
 
