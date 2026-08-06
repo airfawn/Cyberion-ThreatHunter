@@ -16,24 +16,34 @@ class ServerThread(threading.Thread):
                  event_queue: Queue,
                  status_callback=None):
         super().__init__(daemon=True)
-        self.host = "192.168.1.10"
-        self.port = 9090
+        # Respect caller-provided bind settings (main module defines defaults).
+        self.host = host
+        self.port = port
         self.event_queue = event_queue
         self.status_cb = status_callback or (lambda s: None)
+        self._stop_event = threading.Event()
 
     def run(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind((self.host, self.port))
             srv.listen(1)
-            while True:
+            srv.settimeout(1.0)
+            self.status_cb("Waiting for connection")
+            while not self._stop_event.is_set():
                 try:
+                    # Waiting state: blocked until a client connects.
                     conn, addr = srv.accept()
-                    self.status_cb("● Connected")
+                    self.status_cb("Connected")
                     with conn:
+                        conn.settimeout(1.0)
                         buffer = ""
-                        while True:
-                            data = conn.recv(4096).decode("utf-8")
+                        # Connected state: actively receive and process messages.
+                        while not self._stop_event.is_set():
+                            try:
+                                data = conn.recv(4096).decode("utf-8")
+                            except socket.timeout:
+                                continue
                             if not data:
                                 break
                             buffer += data
@@ -41,11 +51,15 @@ class ServerThread(threading.Thread):
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
                                 self._handle_line(line.strip())
-                    self.status_cb("● Disconnected")
+                    self.status_cb("Waiting for connection")
+                except socket.timeout:
+                    continue
                 except Exception as exc:
                     # A socket error means the listening loop should stop
                     print(f"[Server] Error: {exc}")
-                    break
+                    self.status_cb("Waiting for connection")
+                    if self._stop_event.is_set():
+                        break
 
     def _handle_line(self, line: str):
         if not line:
@@ -65,6 +79,7 @@ class ServerThread(threading.Thread):
             pass
 
     def stop(self):
+        self._stop_event.set()
         try:
             with socket.create_connection((self.host, self.port), timeout=1):
                 pass  # just to unblock accept()
