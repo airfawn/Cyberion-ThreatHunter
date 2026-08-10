@@ -37,8 +37,13 @@ from PyQt5.QtWidgets import (
 )
 
 try:
-    from .database import EventDB  # type: ignore
+    from .database import SCHEMA_COLUMNS, CyberionDB, EventPersistenceWorker  # type: ignore
+    from .event_repository import EventRepository  # type: ignore
     from .server import ServerThread  # type: ignore
+    from .query import CyberionQueryEngine, QueryEngineError  # type: ignore
+    from .ui import SearchPage  # type: ignore
+    from .ui.alerts_page import AlertsPage  # type: ignore
+    from .ui.detections_page import DetectionsPage  # type: ignore
 except Exception as e:  # pragma: no cover - startup guard
     print("Failed to import server/database modules:", e)
     sys.exit(1)
@@ -191,7 +196,18 @@ class MainWindow(QMainWindow):
         self.search_query = ""
 
         self.event_queue: "queue.Queue[tuple[str, str, str, str, dict[str, str]]]" = queue.Queue()
-        self.db = EventDB()
+        self.persist_queue: "queue.Queue[tuple[str, str, str, str, dict[str, str]]]" = queue.Queue()
+        self.db = CyberionDB()
+        self.event_repo = EventRepository(db=self.db)
+        self.query_engine = CyberionQueryEngine(self.db)
+        self.persistence_worker = EventPersistenceWorker(
+            self.db, self.persist_queue, self.event_queue
+        )
+        
+        # Query state
+        self.current_query = ""
+        self.query_results = []
+        self.is_query_mode = False  # True when showing query results, False when live
 
         self.socket_message_queue: "queue.Queue[str]" = queue.Queue()
         self.socket_server_stop = threading.Event()
@@ -206,10 +222,11 @@ class MainWindow(QMainWindow):
         self.server_thread = ServerThread(
             self.server_host,
             self.server_port,
-            self.event_queue,
+            self.persist_queue,
             status_callback=self.status_signal.status_changed.emit,
         )
         self.server_thread.start()
+        self.persistence_worker.start()
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(200)
@@ -222,6 +239,7 @@ class MainWindow(QMainWindow):
         self.socket_poll_timer.start()
 
         self.start_server()
+        self._load_events_from_db()
         self._refresh_table()
 
     def _build_ui(self):
@@ -320,18 +338,26 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(8)
 
         self.top_nav = QTabBar()
+        self.top_nav.addTab("Search")
         self.top_nav.addTab("Event Monitoring")
         self.top_nav.addTab("Alerts")
+        self.top_nav.addTab("Detections")
         main_layout.addWidget(self.top_nav)
 
         self.main_stack = QStackedWidget()
+        self.main_stack.addWidget(self._build_search_page())
         self.main_stack.addWidget(self._build_event_monitor_page())
         self.main_stack.addWidget(self._build_alerts_page())
+        self.main_stack.addWidget(self._build_detections_page())
         main_layout.addWidget(self.main_stack)
 
         self.top_nav.currentChanged.connect(self.main_stack.setCurrentIndex)
         self.top_nav.setCurrentIndex(0)
         return main_pane
+
+    def _build_search_page(self) -> QWidget:
+        """Build the Search page with visual query builder."""
+        return SearchPage(query_engine=self.query_engine, parent=self)
 
     def _build_event_monitor_page(self) -> QWidget:
         page = QWidget()
@@ -347,8 +373,37 @@ class MainWindow(QMainWindow):
         self.event_count_lbl.setFont(QFont("Arial", 11))
         layout.addWidget(self.event_count_lbl)
 
+        # Query bar
+        query_bar_layout = QHBoxLayout()
+        query_label = QLabel("Query:")
+        query_label.setFont(QFont("Arial", 10, QFont.Bold))
+        query_bar_layout.addWidget(query_label)
+
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText(
+            'Example: events | where severity >= 3 | take 100'
+        )
+        self.query_input.returnPressed.connect(self._on_query_execute)
+        query_bar_layout.addWidget(self.query_input)
+
+        self.query_run_btn = QPushButton("Run Query")
+        self.query_run_btn.clicked.connect(self._on_query_execute)
+        query_bar_layout.addWidget(self.query_run_btn)
+
+        self.query_clear_btn = QPushButton("Clear")
+        self.query_clear_btn.clicked.connect(self._on_query_clear)
+        query_bar_layout.addWidget(self.query_clear_btn)
+
+        layout.addLayout(query_bar_layout)
+
+        # Query result / status
+        self.query_status_lbl = QLabel("")
+        self.query_status_lbl.setStyleSheet("color: #888888; font-size: 10px;")
+        layout.addWidget(self.query_status_lbl)
+
+        # Legacy search box (for live mode filter)
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search events...")
+        self.search_input.setPlaceholderText("Search events in live mode (contains)...")
         self.search_input.textChanged.connect(self._on_search_changed)
         layout.addWidget(self.search_input)
 
@@ -374,14 +429,12 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_alerts_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        alerts_placeholder = QLabel("Alerts page is ready.")
-        alerts_placeholder.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        layout.addWidget(alerts_placeholder)
-        layout.addStretch(1)
-        return page
+        """Build the Alerts management page."""
+        return AlertsPage(alert_manager=self.db.alerts, parent=self)
+
+    def _build_detections_page(self) -> QWidget:
+        """Build the Detections management page."""
+        return DetectionsPage(detection_manager=self.db.detections, parent=self)
 
     def _apply_styles(self):
         self.setStyleSheet(
@@ -527,7 +580,7 @@ class MainWindow(QMainWindow):
         self.server_thread = ServerThread(
             self.server_host,
             self.server_port,
-            self.event_queue,
+            self.persist_queue,
             status_callback=self.status_signal.status_changed.emit,
         )
         self.server_thread.start()
@@ -715,12 +768,6 @@ class MainWindow(QMainWindow):
                 raw_message = raw_event
                 structured = None
 
-            try:
-                self.db.insert_event(received_at, source, raw_event)
-            except Exception as exc:
-                print("DB insert error:", exc)
-                continue
-
             self.events.append(
                 self._normalize_event(received_at, source, raw_event, raw_message, structured)
             )
@@ -733,6 +780,66 @@ class MainWindow(QMainWindow):
             self.event_count_lbl.setText(f"Events Received: {self.event_counter}")
             self.side_event_count_lbl.setText(f"Events Received: {self.event_counter}")
             self._refresh_table()
+
+    def _load_events_from_db(self):
+        """Restore previously persisted events into the table on startup."""
+        try:
+            records = self.event_repo.load_recent(limit=MAX_EVENTS)
+        except Exception as exc:
+            print("Failed to load events from database:", exc)
+            return
+
+        skip_keys = set(SCHEMA_COLUMNS) | {
+            "id",
+            "received_at",
+            "raw_event",
+            "raw_message",
+            "extra",
+            "structured",
+        }
+        loaded = []
+        for row in records:
+            try:
+                normalized = self._normalize_event(
+                    row.get("received_at") or row.get("timestamp") or "",
+                    row.get("source") or "",
+                    row.get("raw_event") or "",
+                    row.get("raw_message") or row.get("raw_event") or "",
+                    row.get("structured") or None,
+                )
+            except Exception as exc:
+                print("Failed to normalize stored event:", exc)
+                continue
+
+            if not normalized.get("process") and row.get("process_name"):
+                normalized["process"] = row["process_name"]
+
+            for key, value in row.items():
+                if key in skip_keys or key in self.known_fields:
+                    continue
+                if value is None or value == "" or isinstance(value, (dict, list)):
+                    continue
+                normalized[key] = str(value)
+                self.known_fields.add(key)
+                self._add_new_field(key, key.replace("_", " ").title())
+
+            loaded.append(normalized)
+
+        if not loaded:
+            return
+
+        # Records are newest-first; the table expects oldest-first.
+        loaded.reverse()
+        self.events = loaded
+        if len(self.events) > MAX_EVENTS:
+            self.events = self.events[-MAX_EVENTS:]
+        try:
+            self.event_counter = self.event_repo.event_count()
+        except Exception:
+            self.event_counter = len(loaded)
+        self.event_count_lbl.setText(f"Events Received: {self.event_counter}")
+        self.side_event_count_lbl.setText(f"Events Received: {self.event_counter}")
+        self._refresh_table()
 
     def start_server(self):
         """Keep legacy auxiliary listener functionality intact."""
@@ -787,6 +894,72 @@ class MainWindow(QMainWindow):
                 break
             self.messages_display.addItem(msg)
 
+    def _on_query_execute(self):
+        """Execute a query and display results."""
+        query_text = self.query_input.text().strip()
+        if not query_text:
+            self.query_status_lbl.setText("No query entered.")
+            return
+
+        try:
+            self.query_status_lbl.setText("Executing query...")
+            self.query_run_btn.setEnabled(False)
+
+            # Execute the query
+            result = self.query_engine.execute(query_text)
+
+            self.current_query = query_text
+            self.query_results = result.rows
+            self.is_query_mode = True
+
+            # Display results in table
+            self._display_query_results(result)
+
+            self.query_status_lbl.setText(
+                f"Query returned {result.row_count} events in {result.execution_time_ms:.1f}ms"
+            )
+
+        except QueryEngineError as e:
+            self.query_status_lbl.setText(f"Query error: {str(e)}")
+        except Exception as e:
+            self.query_status_lbl.setText(f"Unexpected error: {str(e)}")
+        finally:
+            self.query_run_btn.setEnabled(True)
+
+    def _display_query_results(self, result):
+        """Display query results in the table."""
+        # Use result columns if available, otherwise use selected fields
+        columns = result.columns if result.columns else self._selected_field_keys()
+
+        self.table_model.clear()
+        self.table_model.setColumnCount(len(columns))
+        self.table_model.setHorizontalHeaderLabels(columns)
+
+        for row_dict in result.rows:
+            row_items = []
+            for col in columns:
+                value = row_dict.get(col, "")
+                item = QStandardItem(str(value) if value is not None else "")
+                item.setEditable(False)
+                row_items.append(item)
+            self.table_model.appendRow(row_items)
+
+        # Auto-size columns
+        for idx, col in enumerate(columns):
+            self.table_view.horizontalHeader().setSectionResizeMode(idx, QHeaderView.ResizeToContents)
+
+    def _on_query_clear(self):
+        """Clear the query and return to live mode."""
+        self.query_input.clear()
+        self.query_status_lbl.setText("")
+        self.is_query_mode = False
+        self.current_query = ""
+        self.query_results = []
+        self.search_query = ""
+        self.search_input.clear()
+        self._refresh_table()  # Return to live event display
+
+
     def closeEvent(self, event):
         self.socket_server_stop.set()
         try:
@@ -802,6 +975,12 @@ class MainWindow(QMainWindow):
         try:
             self.server_thread.stop()
             self.server_thread.join(timeout=1)
+        except Exception:
+            pass
+        try:
+            # Stop the persistence worker after the server so any queued
+            # events are drained and flushed before the DB is closed.
+            self.persistence_worker.stop()
         except Exception:
             pass
         try:

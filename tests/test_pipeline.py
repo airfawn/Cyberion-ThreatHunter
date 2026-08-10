@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget  # noqa: 
 
 from Agent.log_queue import LogEntry, LogQueue, LogSender  # noqa: E402
 from Agent.connector import connector as Connector  # noqa: E402
-from src.database import EventDB  # noqa: E402
+from src.database import CyberionDB  # noqa: E402
 from src.main import EventDetailsDialog, MainWindow  # noqa: E402
 from src.server import ServerThread  # noqa: E402
 
@@ -468,8 +468,15 @@ def test_connector_heartbeat_interval_and_gating():
 
 
 def test_eventdb_roundtrip(tmp_path):
-    db = EventDB(tmp_path / "test.db")
-    row_id = db.insert_event("t0", "log:auth", '{"a": 1}')
+    db = CyberionDB(tmp_path / "test.db")
+    row_id = db.insert_event(
+        {
+            "received_at": "t0",
+            "source": "log:auth",
+            "raw_event": '{"a": 1}',
+            "event_type": "auth",
+        }
+    )
     rows = db.fetch_all()
     assert len(rows) == 1
     assert rows[0][0] == row_id
