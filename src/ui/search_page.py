@@ -21,6 +21,7 @@ from .visual_query_builder import VisualQueryBuilder
 from ..query.query_model import QueryDefinition
 from ..query.model_to_kql import query_definition_to_kql
 from ..query import CyberionQueryEngine
+from .theme import COLORS, theme_font
 
 
 class SearchPage(QWidget):
@@ -30,6 +31,7 @@ class SearchPage(QWidget):
         super().__init__(parent)
         self.query_engine = query_engine
         self._init_ui()
+        self._apply_styles()
     
     def _init_ui(self):
         """Initialize the UI."""
@@ -39,7 +41,7 @@ class SearchPage(QWidget):
         
         # Title
         title = QLabel("Search Events")
-        title.setFont(QFont("Arial", 14, QFont.Bold))
+        title.setFont(theme_font(18, QFont.DemiBold))
         layout.addWidget(title)
         
         # Tab widget for Visual/KQL modes
@@ -57,7 +59,8 @@ class SearchPage(QWidget):
         
         # Results section
         results_label = QLabel("Results")
-        results_label.setFont(QFont("Arial", 11, QFont.Bold))
+        results_label.setFont(theme_font(12, QFont.DemiBold))
+        results_label.setProperty("secondary", True)
         layout.addWidget(results_label)
         
         # Results table
@@ -72,7 +75,8 @@ class SearchPage(QWidget):
         
         # Status bar
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #888888; font-size: 10px;")
+        self.status_label.setFont(theme_font(11))
+        self.status_label.setProperty("secondary", True)
         layout.addWidget(self.status_label)
     
     def _build_visual_mode(self) -> QWidget:
@@ -201,6 +205,16 @@ class SearchPage(QWidget):
             self.result_model.setRowCount(0)
             self.result_model.setColumnCount(0)
     
+    def _apply_styles(self):
+        self.setStyleSheet(
+            f"""
+            QWidget {{ background-color: {COLORS['app_bg']}; color: {COLORS['text_primary']}; }}
+            QTabWidget::pane {{ border: 1px solid {COLORS['border']}; border-radius: 8px; background-color: {COLORS['app_bg']}; }}
+            QLineEdit {{ min-height: 28px; }}
+            QPushButton {{ min-height: 30px; }}
+            """
+        )
+
     def _on_clear_search(self):
         """Clear search results."""
         self.result_model.setRowCount(0)

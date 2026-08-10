@@ -44,6 +44,16 @@ try:
     from .ui import SearchPage  # type: ignore
     from .ui.alerts_page import AlertsPage  # type: ignore
     from .ui.detections_page import DetectionsPage  # type: ignore
+    from .ui.theme import COLORS, theme_font, apply_global_theme  # type: ignore
+except ImportError:
+    from src.database import SCHEMA_COLUMNS, CyberionDB, EventPersistenceWorker  # type: ignore
+    from src.event_repository import EventRepository  # type: ignore
+    from src.server import ServerThread  # type: ignore
+    from src.query import CyberionQueryEngine, QueryEngineError  # type: ignore
+    from src.ui import SearchPage  # type: ignore
+    from src.ui.alerts_page import AlertsPage  # type: ignore
+    from src.ui.detections_page import DetectionsPage  # type: ignore
+    from src.ui.theme import COLORS, theme_font, apply_global_theme  # type: ignore
 except Exception as e:  # pragma: no cover - startup guard
     print("Failed to import server/database modules:", e)
     sys.exit(1)
@@ -167,6 +177,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Cyberion ThreatShield")
         self.setGeometry(100, 100, 1320, 820)
+        self.setObjectName("mainWindow")
 
         self.server_host = host
         self.server_port = port
@@ -261,40 +272,59 @@ class MainWindow(QMainWindow):
 
     def _build_sidebar(self) -> QWidget:
         self.side_panel = QFrame()
-        self.side_panel.setFrameStyle(QFrame.Panel | QFrame.Raised)
+        self.side_panel.setObjectName("sidebar")
+        self.side_panel.setFrameStyle(QFrame.NoFrame)
         side_layout = QVBoxLayout(self.side_panel)
-        side_layout.setContentsMargins(14, 14, 14, 14)
-        side_layout.setSpacing(10)
+        side_layout.setContentsMargins(18, 18, 18, 18)
+        side_layout.setSpacing(12)
 
-        title = QLabel("CYBERION")
-        title.setFont(QFont("Arial", 16, QFont.Bold))
-        side_layout.addWidget(title)
+        title_row = QHBoxLayout()
+        title = QLabel("Cyberion")
+        title.setFont(theme_font(20, QFont.DemiBold))
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        side_layout.addLayout(title_row)
 
-        side_layout.addSpacing(6)
-        server_lbl = QLabel("SERVER")
-        server_lbl.setFont(QFont("Arial", 11, QFont.Bold))
+        subtitle = QLabel("ThreatShield Console")
+        subtitle.setFont(theme_font(11))
+        subtitle.setProperty("secondary", True)
+        side_layout.addWidget(subtitle)
+
+        side_layout.addSpacing(8)
+        server_lbl = QLabel("Server Status")
+        server_lbl.setFont(theme_font(12, QFont.DemiBold))
+        server_lbl.setProperty("secondary", True)
         side_layout.addWidget(server_lbl)
 
+        status_card = QFrame()
+        status_card.setObjectName("statusCard")
+        status_card_layout = QVBoxLayout(status_card)
+        status_card_layout.setContentsMargins(12, 10, 12, 10)
+        status_card_layout.setSpacing(4)
         self.side_agent_status_lbl = QLabel("● Waiting for connection")
-        side_layout.addWidget(self.side_agent_status_lbl)
+        self.side_agent_status_lbl.setFont(theme_font(12))
+        self.side_event_count_lbl = QLabel("Events received: 0")
+        self.side_event_count_lbl.setFont(theme_font(11))
+        self.side_event_count_lbl.setProperty("secondary", True)
+        status_card_layout.addWidget(self.side_agent_status_lbl)
+        status_card_layout.addWidget(self.side_event_count_lbl)
+        side_layout.addWidget(status_card)
 
-        self.side_event_count_lbl = QLabel("Events Received: 0")
-        side_layout.addWidget(self.side_event_count_lbl)
-
-        side_layout.addStretch(1)
-
-        fields_lbl = QLabel("DATA FIELDS")
-        fields_lbl.setFont(QFont("Arial", 11, QFont.Bold))
+        side_layout.addSpacing(8)
+        fields_lbl = QLabel("Visible Data Fields")
+        fields_lbl.setFont(theme_font(12, QFont.DemiBold))
+        fields_lbl.setProperty("secondary", True)
         side_layout.addWidget(fields_lbl)
 
         fields_scroll = QScrollArea()
         fields_scroll.setWidgetResizable(True)
         fields_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         fields_scroll.setMinimumHeight(220)
+        fields_scroll.setFrameShape(QFrame.NoFrame)
 
         self.fields_widget = QWidget()
         self.fields_layout = QVBoxLayout(self.fields_widget)
-        self.fields_layout.setContentsMargins(6, 6, 6, 6)
+        self.fields_layout.setContentsMargins(0, 0, 0, 0)
         self.fields_layout.setSpacing(6)
 
         for key, label in self.available_fields:
@@ -309,25 +339,39 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(fields_scroll)
 
         side_layout.addSpacing(8)
-        settings_lbl = QLabel("SETTINGS")
-        settings_lbl.setFont(QFont("Arial", 11, QFont.Bold))
+        settings_lbl = QLabel("Settings")
+        settings_lbl.setFont(theme_font(12, QFont.DemiBold))
+        settings_lbl.setProperty("secondary", True)
         side_layout.addWidget(settings_lbl)
 
-        side_layout.addWidget(QLabel("Server IP"))
-        self.server_ip_edit = QLineEdit(self.server_host)
-        side_layout.addWidget(self.server_ip_edit)
+        settings_card = QFrame()
+        settings_card.setObjectName("settingsCard")
+        settings_layout = QVBoxLayout(settings_card)
+        settings_layout.setContentsMargins(12, 10, 12, 10)
+        settings_layout.setSpacing(8)
 
-        side_layout.addWidget(QLabel("Server Port"))
+        ip_label = QLabel("Server IP")
+        ip_label.setProperty("secondary", True)
+        self.server_ip_edit = QLineEdit(self.server_host)
+        settings_layout.addWidget(ip_label)
+        settings_layout.addWidget(self.server_ip_edit)
+
+        port_label = QLabel("Server Port")
+        port_label.setProperty("secondary", True)
         self.server_port_edit = QLineEdit(str(self.server_port))
-        side_layout.addWidget(self.server_port_edit)
+        settings_layout.addWidget(port_label)
+        settings_layout.addWidget(self.server_port_edit)
 
         self.save_settings_btn = QPushButton("Save")
+        self.save_settings_btn.setObjectName("primaryButton")
         self.save_settings_btn.clicked.connect(self._save_settings)
-        side_layout.addWidget(self.save_settings_btn)
+        settings_layout.addWidget(self.save_settings_btn)
 
         self.settings_feedback_lbl = QLabel("")
         self.settings_feedback_lbl.setWordWrap(True)
-        side_layout.addWidget(self.settings_feedback_lbl)
+        self.settings_feedback_lbl.setProperty("secondary", True)
+        settings_layout.addWidget(self.settings_feedback_lbl)
+        side_layout.addWidget(settings_card)
 
         return self.side_panel
 
@@ -335,7 +379,7 @@ class MainWindow(QMainWindow):
         main_pane = QWidget()
         main_layout = QVBoxLayout(main_pane)
         main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(10)
 
         self.top_nav = QTabBar()
         self.top_nav.addTab("Search")
@@ -365,18 +409,23 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(8)
 
+        header_row = QHBoxLayout()
         self.agent_status_lbl = QLabel("Agent Status: Waiting for connection")
-        self.agent_status_lbl.setFont(QFont("Arial", 12, QFont.Bold))
-        layout.addWidget(self.agent_status_lbl)
+        self.agent_status_lbl.setFont(theme_font(16, QFont.DemiBold))
+        header_row.addWidget(self.agent_status_lbl)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
 
         self.event_count_lbl = QLabel("Events Received: 0")
-        self.event_count_lbl.setFont(QFont("Arial", 11))
+        self.event_count_lbl.setFont(theme_font(11))
+        self.event_count_lbl.setProperty("secondary", True)
         layout.addWidget(self.event_count_lbl)
 
         # Query bar
         query_bar_layout = QHBoxLayout()
-        query_label = QLabel("Query:")
-        query_label.setFont(QFont("Arial", 10, QFont.Bold))
+        query_label = QLabel("Query")
+        query_label.setFont(theme_font(12, QFont.DemiBold))
+        query_label.setProperty("secondary", True)
         query_bar_layout.addWidget(query_label)
 
         self.query_input = QLineEdit()
@@ -387,6 +436,7 @@ class MainWindow(QMainWindow):
         query_bar_layout.addWidget(self.query_input)
 
         self.query_run_btn = QPushButton("Run Query")
+        self.query_run_btn.setObjectName("primaryButton")
         self.query_run_btn.clicked.connect(self._on_query_execute)
         query_bar_layout.addWidget(self.query_run_btn)
 
@@ -437,71 +487,24 @@ class MainWindow(QMainWindow):
         return DetectionsPage(detection_manager=self.db.detections, parent=self)
 
     def _apply_styles(self):
+        app = QApplication.instance()
+        if app is not None:
+            apply_global_theme(app)
         self.setStyleSheet(
             """
-            QMainWindow {
-                background-color: #1a1a1a;
-                color: #ffffff;
+            QMainWindow#mainWindow {
+                background-color: #0B0F14;
             }
-
-            QFrame {
-                background-color: #2d2d2d;
-                border-radius: 5px;
+            QFrame#statusCard, QFrame#settingsCard {
+                background-color: #151B23;
+                border: 1px solid #27313D;
+                border-radius: 8px;
             }
-
-            QTabBar {
-                background-color: #3c3c3c;
-                color: #ffffff;
-            }
-
-            QTabBar::tab {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                padding: 8px 12px;
-                margin-right: 2px;
-            }
-
-            QTabBar::tab:selected {
-                background-color: #4a82ea;
-            }
-
             QTableView {
-                background-color: #1e1e1e;
-                alternate-background-color: #252525;
-                gridline-color: #444444;
-                color: #f0f0f0;
-                border-radius: 5px;
-                padding: 4px;
+                margin-top: 4px;
             }
-
-            QHeaderView::section {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                font-size: 13px;
-                padding: 6px;
-                border-bottom: 2px solid white;
-            }
-
-            QLineEdit {
-                background-color: #202020;
-                color: #ffffff;
-                border: 1px solid #4a4a4a;
-                border-radius: 4px;
-                padding: 6px;
-            }
-
-            QPushButton {
-                background-color: #4a82ea;
-                color: #ffffff;
-                border-radius: 4px;
-                padding: 6px 8px;
-            }
-
-            QListWidget {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border-radius: 5px;
-                padding: 4px;
+            QLineEdit, QTextEdit, QComboBox, QSpinBox, QDateTimeEdit {
+                min-height: 28px;
             }
             """
         )

@@ -17,6 +17,7 @@ from ..alerts import (
 from ..query.query_model import QueryDefinition
 from ..query.model_to_kql import query_definition_to_kql
 from .visual_query_builder import VisualQueryBuilder
+from .theme import COLORS, theme_font
 
 
 class AlertRuleEditor(QDialog):
@@ -45,6 +46,7 @@ class AlertRuleEditor(QDialog):
         self.setMinimumHeight(600)
         
         self._build_ui()
+        self._apply_styles()
         if rule:
             self._populate_from_rule(rule)
     
@@ -52,6 +54,9 @@ class AlertRuleEditor(QDialog):
         """Build the dialog UI."""
         layout = QVBoxLayout()
         
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
         # Basic info section
         basic_group = QGroupBox("Basic Information")
         basic_layout = QFormLayout()
@@ -97,6 +102,7 @@ class AlertRuleEditor(QDialog):
         button_layout.addStretch()
         
         self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("primaryButton")
         self.save_btn.clicked.connect(self.accept)
         button_layout.addWidget(self.save_btn)
         
@@ -107,6 +113,16 @@ class AlertRuleEditor(QDialog):
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
+
+    def _apply_styles(self):
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background-color: {COLORS['app_bg']}; color: {COLORS['text_primary']}; }}
+            QGroupBox {{ border: 1px solid {COLORS['border']}; border-radius: 8px; background-color: {COLORS['app_bg']}; margin-top: 12px; padding-top: 8px; }}
+            QGroupBox::title {{ color: {COLORS['text_secondary']}; padding: 0 6px; }}
+            QPushButton {{ min-height: 30px; }}
+            """
+        )
     
     def _build_query_section(self):
         """Build the query section."""

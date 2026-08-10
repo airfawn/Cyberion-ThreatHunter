@@ -33,6 +33,7 @@ from ..query.query_model import (
     VALID_OPERATORS_BY_TYPE,
 )
 from ..query.model_to_kql import query_definition_to_kql
+from .theme import COLORS, theme_font
 
 
 class ConditionRow(QFrame):
@@ -266,7 +267,7 @@ class VisualQueryBuilder(QWidget):
         
         # Conditions title
         title = QLabel("Conditions")
-        title.setFont(QFont("Arial", 11, QFont.Bold))
+        title.setFont(theme_font(12, QFont.DemiBold))
         layout.addWidget(title)
         
         # Scrollable area for conditions
@@ -315,18 +316,28 @@ class VisualQueryBuilder(QWidget):
         
         # Generated KQL display
         kql_title = QLabel("Generated KQL")
-        kql_title.setFont(QFont("Arial", 11, QFont.Bold))
+        kql_title.setFont(theme_font(12, QFont.DemiBold))
         layout.addWidget(kql_title)
         
         self.kql_display = QLineEdit()
         self.kql_display.setReadOnly(True)
         self.kql_display.setStyleSheet(
-            "background-color: #1a1a1a; color: #00ff00; font-family: monospace;"
+            "background-color: #11161D; color: #38BDF8; font-family: Menlo, Consolas, monospace;"
         )
         layout.addWidget(self.kql_display)
         
         self._update_kql_display()
     
+    def _apply_styles(self):
+        self.setStyleSheet(
+            f"""
+            QWidget {{ background-color: {COLORS['app_bg']}; color: {COLORS['text_primary']}; }}
+            QFrame {{ background-color: {COLORS['surface_primary']}; border: 1px solid {COLORS['border']}; border-radius: 6px; }}
+            QPushButton {{ min-height: 30px; }}
+            QComboBox, QLineEdit, QSpinBox, QDateTimeEdit {{ min-height: 28px; }}
+            """
+        )
+
     def _add_condition_row(self, condition: Optional[Condition] = None):
         """Add a condition row."""
         row = ConditionRow(condition=condition)

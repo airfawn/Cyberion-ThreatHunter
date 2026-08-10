@@ -8,15 +8,16 @@ from datetime import datetime
 from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QStandardItemModel, QStandardItem
+from PyQt5.QtGui import QFont, QStandardItemModel, QStandardItem
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableView,
-    QTabWidget, QMessageBox, QMenu, QApplication
+    QTabWidget, QMessageBox, QMenu, QApplication, QLabel
 )
 
 from ..alerts import AlertRule, AlertSeverity
 from ..alerts.manager import AlertManager
 from .alert_editor import AlertRuleEditor
+from .theme import COLORS, theme_font
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class AlertsPage(QWidget):
         self.alert_manager = alert_manager
         
         self._build_ui()
+        self._apply_styles()
         self._refresh_data()
         
         # Auto-refresh timer (every 5 seconds)
@@ -53,7 +55,13 @@ class AlertsPage(QWidget):
     
     def _build_ui(self):
         """Build the UI layout."""
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        
+        title = QLabel("Alert Rules")
+        title.setFont(theme_font(18, QFont.DemiBold))
+        layout.addWidget(title)
         
         # Top toolbar
         toolbar = self._build_toolbar()
@@ -85,6 +93,7 @@ class AlertsPage(QWidget):
         layout = QHBoxLayout()
         
         self.create_btn = QPushButton("+ Create New Rule")
+        self.create_btn.setObjectName("primaryButton")
         self.create_btn.clicked.connect(self._on_create_rule)
         
         layout.addWidget(self.create_btn)
@@ -98,6 +107,7 @@ class AlertsPage(QWidget):
         table.setSelectionBehavior(table.SelectionBehavior.SelectRows)
         table.setSelectionMode(table.SelectionMode.SingleSelection)
         table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
         
         model = QStandardItemModel(0, 7)
         model.setHorizontalHeaderLabels([
@@ -131,6 +141,15 @@ class AlertsPage(QWidget):
         
         return table
     
+    def _apply_styles(self):
+        self.setStyleSheet(
+            f"""
+            QWidget {{ background-color: {COLORS['app_bg']}; color: {COLORS['text_primary']}; }}
+            QTabWidget::pane {{ border: 1px solid {COLORS['border']}; border-radius: 8px; background-color: {COLORS['app_bg']}; }}
+            QPushButton {{ min-height: 30px; }}
+            """
+        )
+
     def _refresh_data(self):
         """Refresh rule data from database."""
         if not hasattr(self, "all_table") or self.alert_manager is None:
