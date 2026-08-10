@@ -2,8 +2,19 @@ import socket
 import time
 import json
 import os
+import platform
+import shutil
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:  # pragma: no cover
+    yaml = None
 
 from .collector import Collector, gather_initial_data
 from .log_queue import LogQueue, LogSender, LogEntry
@@ -24,22 +35,71 @@ def _get_env_int(name: str, default: int) -> int:
     return value
 
 
-def get_agent_target() -> tuple[str, int]:
-    """Resolve agent destination from environment variables."""
-    server_host = os.getenv("THREATHUNTER_SERVER_HOST")
+def _default_config_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "agent.yaml"
+
+
+def load_agent_config(config_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Load agent configuration from YAML if available, falling back to environment defaults."""
+    config_file = Path(config_path or os.getenv("THREATHUNTER_AGENT_CONFIG") or _default_config_path())
+    if not config_file.exists():
+        return {}
+
+    if yaml is None:
+        print("[Agent] PyYAML is not installed; ignoring agent configuration file")
+        return {}
+
+    try:
+        with config_file.open("r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle) or {}
+    except Exception as exc:  # pragma: no cover
+        print(f"[Agent] Failed to read agent config {config_file}: {exc}")
+        return {}
+
+    if not isinstance(loaded, dict):
+        return {}
+    return loaded
+
+
+def resolve_agent_target(config: dict[str, Any] | None = None) -> tuple[str, int]:
+    """Resolve agent destination from config, environment variables, or defaults."""
+    config = config or load_agent_config()
+    server_cfg = config.get("server", {}) if isinstance(config.get("server"), dict) else {}
+    server_host = server_cfg.get("host") or os.getenv("THREATHUNTER_SERVER_HOST")
     if server_host:
-        host = server_host
+        host = str(server_host)
     else:
         bind_host = os.getenv("THREATHUNTER_BIND_HOST", "0.0.0.0")
         host = "127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host
-    port = _get_env_int("THREATHUNTER_PORT", 9090)
+
+    port_value = server_cfg.get("port") or os.getenv("THREATHUNTER_PORT")
+    if port_value is None:
+        port = 9090
+    else:
+        try:
+            port = int(port_value)
+        except (TypeError, ValueError):
+            port = _get_env_int("THREATHUNTER_PORT", 9090)
     return host, port
 
 
+def resolve_collector_sources(config: dict[str, Any] | None = None) -> list[str]:
+    config = config or load_agent_config()
+    collector_cfg = config.get("collector", {}) if isinstance(config.get("collector"), dict) else {}
+    sources = collector_cfg.get("sources") or []
+    if isinstance(sources, str):
+        sources = [sources]
+    if not isinstance(sources, list):
+        return []
+    return [str(source) for source in sources if str(source)]
+
+
 class connector:
-    def __init__(self, server_ip="127.0.0.1", server_port=9090):
+    def __init__(self, server_ip="127.0.0.1", server_port=9090, config: dict[str, Any] | None = None):
         self.server_ip = server_ip
         self.server_port = server_port
+        self.config = config or load_agent_config()
+        self.collector_sources = resolve_collector_sources(self.config)
         self.socket = None
         self.reconnect_delay = _get_env_int("THREATHUNTER_RECONNECT_DELAY", 3)
 
@@ -62,6 +122,7 @@ class connector:
         self.collector = None
         self._running = False
         self._initial_data_sent = False
+        self.collector_interval = self._resolve_collector_interval()
 
         # Heartbeat
         self._last_heartbeat = 0.0
@@ -103,11 +164,23 @@ class connector:
         }
         return self._send_raw(json.dumps(payload) + "\n")
 
+    def _resolve_collector_interval(self) -> int:
+        collector_cfg = self.config.get("collector", {}) if isinstance(self.config.get("collector"), dict) else {}
+        interval = collector_cfg.get("interval")
+        if isinstance(interval, (int, float)):
+            return int(interval)
+        try:
+            return int(os.getenv("THREATHUNTER_COLLECTOR_INTERVAL", "10"))
+        except ValueError:
+            return 10
+
     def _start_collector(self):
         """Start the log collector thread."""
         if self.collector is not None:
             return
-        self.collector = Collector(send_callback=self._queue_collected_event)
+        self.collector = Collector(send_callback=self._queue_collected_event, interval=self.collector_interval)
+        if self.collector_sources:
+            self.collector.selected_sources = self.collector_sources
         self.collector.start()
         print("[Agent] Log collector started")
 
@@ -197,8 +270,73 @@ class connector:
         self._running = False
 
 
+def install_autostart_linux() -> bool:
+    """Install a systemd user service for Linux autostart."""
+    if platform.system() != "Linux":
+        return False
+    service_path = Path.home() / ".config/systemd/user/cyberion-agent.service"
+    service_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path = Path(os.getenv("THREATHUNTER_AGENT_CONFIG") or _default_config_path())
+    cmd = sys.executable
+    content = f"""[Unit]
+Description=Cyberion Agent
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart={cmd} -m Agent.connector --config {config_path}
+Environment=THREATHUNTER_AGENT_CONFIG={config_path}
+WorkingDirectory={Path(__file__).resolve().parent.parent}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+"""
+    service_path.write_text(content, encoding="utf-8")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "--user", "enable", "cyberion-agent.service"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def install_autostart_windows() -> bool:
+    """Prepare a Windows startup shortcut for future use."""
+    if platform.system() != "Windows":
+        return False
+    startup_dir = Path(os.getenv("APPDATA", "")) / "Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+    if str(startup_dir) == "Microsoft\\Windows\\Start Menu\\Programs\\Startup":
+        return False
+    startup_dir.mkdir(parents=True, exist_ok=True)
+    target = startup_dir / "cyberion-agent.bat"
+    config_path = Path(os.getenv("THREATHUNTER_AGENT_CONFIG") or _default_config_path())
+    target.write_text(
+        f'@echo off\n"{sys.executable}" -m Agent.connector --config "{config_path}"\n',
+        encoding="utf-8",
+    )
+    return True
+
+
+def install_autostart() -> bool:
+    if platform.system() == "Windows":
+        return install_autostart_windows()
+    return install_autostart_linux()
+
+
 if __name__ == "__main__":
-    target_host, target_port = get_agent_target()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Cyberion Agent")
+    parser.add_argument("--config", default=None, help="Path to the agent YAML config")
+    parser.add_argument("--install-autostart", action="store_true", help="Install startup entry for the current platform")
+    args = parser.parse_args()
+
+    config_path = args.config
+    if args.install_autostart:
+        print("Installing autostart entry...")
+        print("Autostart installed" if install_autostart() else "Autostart not supported on this platform")
+        sys.exit(0)
+
+    config = load_agent_config(config_path)
+    target_host, target_port = resolve_agent_target(config)
     print(f"Starting agent; target server {target_host}:{target_port}")
-    conn = connector(server_ip=target_host, server_port=target_port)
+    conn = connector(server_ip=target_host, server_port=target_port, config=config)
     conn.run()

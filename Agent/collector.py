@@ -13,9 +13,10 @@ from pathlib import Path
 class Collector:
     """Collects Linux system logs from various sources."""
 
-    def __init__(self, send_callback, interval=10):
+    def __init__(self, send_callback, interval=10, selected_sources=None):
         self.send_callback = send_callback
         self.interval = interval
+        self.selected_sources = selected_sources or []
         self._stop_event = threading.Event()
         self._thread = None
         self._last_positions = {}
@@ -57,9 +58,11 @@ class Collector:
             self._stop_event.wait(self.interval)
 
     def _collect_all(self):
-        if self._journalctl_available:
-            self._collect_journald()
-        self._collect_log_files()
+        if not self.selected_sources or "journald" in self.selected_sources:
+            if self._journalctl_available:
+                self._collect_journald()
+        if not self.selected_sources or any(source in self.selected_sources for source in self._log_files):
+            self._collect_log_files()
 
     def _collect_journald(self):
         self._collect_journal_unit("ssh", "ssh.service")
@@ -203,6 +206,8 @@ class Collector:
 
     def _collect_log_files(self):
         for name, path in self._log_files.items():
+            if self.selected_sources and name not in self.selected_sources:
+                continue
             try:
                 self._collect_log_file(name, path)
             except Exception as e:

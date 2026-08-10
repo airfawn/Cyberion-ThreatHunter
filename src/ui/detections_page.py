@@ -5,7 +5,15 @@ from typing import Optional
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QStandardItem, QStandardItemModel
-from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QTableView, QVBoxLayout, QWidget, QLabel
+from PyQt5.QtWidgets import (
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .theme import COLORS, theme_font
 
@@ -47,6 +55,11 @@ class DetectionsPage(QWidget):
         self.table.setSelectionBehavior(QTableView.SelectRows)
         self.table.setSelectionMode(QTableView.SingleSelection)
         self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setMinimumHeight(320)
         layout.addWidget(self.table, 1)
 
     def _apply_styles(self) -> None:
@@ -92,4 +105,10 @@ class DetectionsPage(QWidget):
             model.setItem(row, 5, QStandardItem(detected_at))
 
         self.table.setModel(model)
+        self.table.setColumnWidth(0, 140)
+        self.table.setColumnWidth(1, 180)
+        self.table.setColumnWidth(2, 100)
+        self.table.setColumnWidth(3, 100)
+        self.table.setColumnWidth(4, 120)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self.table.resizeColumnsToContents()
