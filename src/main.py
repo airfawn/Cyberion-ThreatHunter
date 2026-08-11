@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QStandardItem, QStandardItemModel
+from PyQt5.QtGui import QBrush, QColor, QFont, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -41,6 +41,7 @@ try:
     from .event_repository import EventRepository  # type: ignore
     from .server import ServerThread  # type: ignore
     from .query import CyberionQueryEngine, QueryEngineError  # type: ignore
+    from .severity import load_severity_engine  # type: ignore
     from .ui import SearchPage  # type: ignore
     from .ui.alerts_page import AlertsPage  # type: ignore
     from .ui.detections_page import DetectionsPage  # type: ignore
@@ -50,6 +51,7 @@ except ImportError:
     from src.event_repository import EventRepository  # type: ignore
     from src.server import ServerThread  # type: ignore
     from src.query import CyberionQueryEngine, QueryEngineError  # type: ignore
+    from src.severity import load_severity_engine  # type: ignore
     from src.ui import SearchPage  # type: ignore
     from src.ui.alerts_page import AlertsPage  # type: ignore
     from src.ui.detections_page import DetectionsPage  # type: ignore
@@ -62,13 +64,27 @@ except Exception as e:  # pragma: no cover - startup guard
 MAX_EVENTS = 5000
 SETTINGS_FILE = "cyberion_settings.json"
 
+# Severity indicator column (always the leftmost table column).
+SEV_COLUMN_KEY = "sev"
+# Severity filter order shown in the UI (All + levels).
+SEVERITY_FILTER_LEVELS = ("good", "info", "warning", "bad", "critical")
+# Numeric rank used for severity sorting (higher = more severe).
+SEV_RANK = {level: rank for rank, level in enumerate(SEVERITY_FILTER_LEVELS)}
+# Display columns styled with a monospace font for readability.
+MONO_FIELDS = {"timestamp", "pid", "ip_address", "message", "command", "filepath", "raw_message"}
+
 
 class AgentStatusSignal(QObject):
     status_changed = pyqtSignal(str)
 
 
 class EventDetailsDialog(QDialog):
-    """Shows every field of a single event plus its original raw JSON."""
+    """Shows every field of a single event plus its original raw JSON.
+
+    The severity classification and the rule that produced it are shown at
+    the top when the event was classified (i.e. it carries ``_severity`` /
+    ``_severity_reason`` metadata). The underlying event is never modified.
+    """
 
     def __init__(self, event: dict, parent=None):
         super().__init__(parent)
@@ -81,6 +97,32 @@ class EventDetailsDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        severity_level = event.get("_severity")
+        if severity_level:
+            sev = event.get("_severity_presentation", {})
+            header = QFrame()
+            header.setStyleSheet(
+                "QFrame { background-color: #151B23; border: 1px solid #27313D;"
+                " border-radius: 6px; }"
+            )
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(12, 8, 12, 8)
+            symbol_lbl = QLabel(str(sev.get("symbol", "")))
+            symbol_lbl.setFont(theme_font(16))
+            label_lbl = QLabel(str(sev.get("label", severity_level.upper())))
+            label_lbl.setFont(theme_font(13, QFont.DemiBold))
+            label_lbl.setStyleSheet(f"color: {sev.get('color', '#FFFFFF')};")
+            header_layout.addWidget(symbol_lbl)
+            header_layout.addWidget(label_lbl)
+            header_layout.addSpacing(6)
+            reason_lbl = QLabel(
+                f"Matched: {event.get('_severity_reason') or 'no explicit rule'}"
+            )
+            reason_lbl.setWordWrap(True)
+            reason_lbl.setStyleSheet("color: #94A3B8;")
+            header_layout.addWidget(reason_lbl, 1)
+            layout.addWidget(header)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content = QWidget()
@@ -88,7 +130,7 @@ class EventDetailsDialog(QDialog):
         grid.setColumnStretch(1, 1)
         row = 0
         for key, value in event.items():
-            if key == "raw_message":
+            if key in {"raw_message", "_severity", "_severity_reason", "_severity_presentation"}:
                 continue
             name_lbl = QLabel(key.replace("_", " ").title())
             name_lbl.setStyleSheet("color: #9aa0a6;")
@@ -219,6 +261,18 @@ class MainWindow(QMainWindow):
         self.current_query = ""
         self.query_results = []
         self.is_query_mode = False  # True when showing query results, False when live
+
+        # Severity classification + filtering state
+        self.severity_engine = load_severity_engine()
+        self.severity_filter: str | None = None  # None = All
+        self.severity_filter_buttons: dict[str, QPushButton] = {}
+
+        # Sorting state (None = arrival order). severity sorting uses rank.
+        self._sort_column: int | None = None
+        self._sort_order = Qt.DescendingOrder
+
+        # Events currently shown in the table (row -> event mapping).
+        self._table_events: list[dict] = []
 
         self.socket_message_queue: "queue.Queue[str]" = queue.Queue()
         self.socket_server_stop = threading.Event()
@@ -452,6 +506,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.query_status_lbl)
 
         # Legacy search box (for live mode filter)
+        # Severity filter row: [ All ] [ Good ] [ Info ] [ Warning ] [ Bad ] [ Critical ]
+        sev_filter_row = QHBoxLayout()
+        sev_filter_label = QLabel("Severity")
+        sev_filter_label.setFont(theme_font(11, QFont.DemiBold))
+        sev_filter_label.setProperty("secondary", True)
+        sev_filter_row.addWidget(sev_filter_label)
+        self._add_severity_filter_button(sev_filter_row, "All", None, checked=True)
+        for level in SEVERITY_FILTER_LEVELS:
+            pres = self.severity_engine.presentation(level)
+            self._add_severity_filter_button(
+                sev_filter_row, pres["label"], level, color=pres["color"]
+            )
+        sev_filter_row.addStretch(1)
+        layout.addLayout(sev_filter_row)
+
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search events in live mode (contains)...")
         self.search_input.textChanged.connect(self._on_search_changed)
@@ -462,12 +531,18 @@ class MainWindow(QMainWindow):
         self.table_view.setModel(self.table_model)
         self.table_view.setAlternatingRowColors(True)
         self.table_view.verticalHeader().hide()
+        self.table_view.verticalHeader().setDefaultSectionSize(26)
         self.table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table_view.setWordWrap(False)
+        self.table_view.setTextElideMode(Qt.ElideRight)
         self.table_view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
         self.table_view.setVerticalScrollMode(QTableView.ScrollPerPixel)
         self.table_view.horizontalHeader().setStretchLastSection(False)
+        self.table_view.setSortingEnabled(False)
+        self.table_view.horizontalHeader().setSortIndicatorShown(True)
+        self.table_view.horizontalHeader().setSectionsClickable(True)
+        self.table_view.horizontalHeader().sectionClicked.connect(self._on_header_section_clicked)
         self.table_view.clicked.connect(self._on_table_clicked)
         layout.addWidget(self.table_view, 1)
 
@@ -660,37 +735,85 @@ class MainWindow(QMainWindow):
                 labels.append(label)
         return labels
 
-    def _filtered_events(self) -> list[dict[str, str]]:
+    def _classify_event(self, event: dict):
+        """Attach severity metadata to a normalized display event (no mutation of
+        the original wire payload; adds private ``_severity*`` keys only)."""
+        engine = self.__dict__.get("severity_engine")
+        if engine is None:
+            return
+        result = engine.classify_event(event)
+        event["_severity"] = result.level
+        event["_severity_reason"] = result.reason
+        event["_severity_presentation"] = {
+            "color": result.color,
+            "label": result.label,
+            "symbol": result.symbol,
+        }
+
+    def _filtered_events(self) -> list[dict]:
+        results = self.events
+        sev = self.__dict__.get("severity_filter")
+        if sev is not None:
+            results = [e for e in results if e.get("_severity") == sev]
+
         query = self.search_query.strip().lower()
         if not query:
-            return self.events
+            return results
 
         matched = []
-        for event in self.events:
+        for event in results:
             for value in event.values():
                 if query in str(value).lower():
                     matched.append(event)
                     break
         return matched
 
-    def _refresh_table(self):
-        selected_keys = self._selected_field_keys()
-        selected_labels = self._selected_field_labels()
+    # ------------------------------------------------------------------ #
+    # Table rendering
+    # ------------------------------------------------------------------ #
 
-        self.table_model.clear()
-        self.table_model.setColumnCount(len(selected_keys))
-        self.table_model.setHorizontalHeaderLabels(selected_labels)
+    def _severity_tint(self, color: str, critical: bool = False):
+        """Subtle severity-colored row tint (stronger for critical events)."""
+        if not color:
+            return None
+        base = QColor(color)
+        base.setAlpha(26 if not critical else 48)
+        return base
 
-        for event in self._filtered_events():
-            row_items = []
-            for key in selected_keys:
-                item = QStandardItem(str(event.get(key, "")))
-                item.setEditable(False)
-                row_items.append(item)
-            self.table_model.appendRow(row_items)
+    def _make_item(self, event: dict, key: str, text, pres: dict, tint, is_sev: bool = False):
+        item = QStandardItem(str(text) if text is not None else "")
+        item.setEditable(False)
+        item.setToolTip(str(text) if text is not None else "")
+        if is_sev:
+            item.setTextAlignment(Qt.AlignCenter)
+            if pres.get("color"):
+                item.setForeground(QBrush(QColor(pres["color"])))
+                bold = QFont()
+                bold.setBold(True)
+                item.setFont(bold)
+        elif key in MONO_FIELDS:
+            item.setFont(QFont("Menlo", 11))
+        if tint is not None:
+            item.setBackground(QBrush(tint))
+        return item
 
-        for idx, key in enumerate(selected_keys):
-            self.table_view.horizontalHeader().setSectionResizeMode(idx, QHeaderView.Interactive)
+    def _build_row_items(self, event: dict, selected_keys: list[str]) -> list[QStandardItem]:
+        sev = event.get("_severity")
+        pres = event.get("_severity_presentation") or {}
+        color = pres.get("color", "")
+        tint = self._severity_tint(color, critical=(sev == "critical"))
+        symbol = pres.get("symbol") or (sev.upper() if sev else "")
+        items = [self._make_item(event, SEV_COLUMN_KEY, symbol, pres, tint, is_sev=True)]
+        for key in selected_keys:
+            items.append(self._make_item(event, key, event.get(key, ""), pres, tint))
+        return items
+
+    def _apply_column_widths(self, selected_keys: list[str]):
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        self.table_view.setColumnWidth(0, 42)
+        for idx, key in enumerate(selected_keys, start=1):
+            header.setSectionResizeMode(idx, QHeaderView.Interactive)
             if key == "timestamp":
                 self.table_view.setColumnWidth(idx, 240)
             elif key in {"source", "event_type", "process", "user"}:
@@ -703,6 +826,122 @@ class MainWindow(QMainWindow):
                 self.table_view.setColumnWidth(idx, 500)
             else:
                 self.table_view.setColumnWidth(idx, 150)
+
+    def _sync_sort_indicator(self):
+        header = self.table_view.horizontalHeader()
+        if self._sort_column is not None:
+            header.setSortIndicator(self._sort_column, self._sort_order)
+
+    def _refresh_table(self):
+        selected_keys = self._selected_field_keys()
+        selected_labels = self._selected_field_labels()
+
+        events = list(self._filtered_events())
+        if self._sort_column is not None:
+            events = self._sort_events(events)
+        self._table_events = events
+
+        columns = [SEV_COLUMN_KEY] + selected_keys
+        headers = ["Sev"] + selected_labels
+
+        model = self.table_model
+        model.beginResetModel()
+        model.clear()
+        model.setColumnCount(len(columns))
+        model.setHorizontalHeaderLabels(headers)
+        for event in events:
+            model.appendRow(self._build_row_items(event, selected_keys))
+        model.endResetModel()
+
+        self._apply_column_widths(selected_keys)
+        self._sync_sort_indicator()
+        self.table_view.viewport().update()
+
+    # ------------------------------------------------------------------ #
+    # Severity filtering
+    # ------------------------------------------------------------------ #
+
+    def _add_severity_filter_button(self, layout, label: str, level, color: str = "", checked: bool = False):
+        btn = QPushButton(label)
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        if color:
+            btn.setStyleSheet(
+                f"QPushButton {{ border: 1px solid {color}; padding: 4px 10px; }}"
+                f"QPushButton:checked {{ background-color: {color}; color: #0B0F14; font-weight: 600; }}"
+            )
+        else:
+            btn.setStyleSheet(
+                "QPushButton { padding: 4px 10px; }"
+                "QPushButton:checked { background-color: #1E3A5F; color: #F1F5F9; font-weight: 600; }"
+            )
+        btn.clicked.connect(
+            lambda _checked=False, b=btn, lvl=level: self._on_severity_filter_clicked(lvl)
+        )
+        layout.addWidget(btn)
+        self.severity_filter_buttons[level] = btn
+
+    def _on_severity_filter_clicked(self, level):
+        for key, btn in self.severity_filter_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(key == level)
+            btn.blockSignals(False)
+        self.severity_filter = level
+        self._refresh_table()
+
+    # ------------------------------------------------------------------ #
+    # Sorting
+    # ------------------------------------------------------------------ #
+
+    def _on_header_section_clicked(self, col: int):
+        if self.__dict__.get("is_query_mode", False):
+            return
+        if self._sort_column == col:
+            self._sort_order = (
+                Qt.AscendingOrder if self._sort_order == Qt.DescendingOrder else Qt.DescendingOrder
+            )
+        else:
+            self._sort_column = col
+            # Natural first-click order: critical/newest first for severity and
+            # timestamp; alphabetical otherwise.
+            self._sort_order = (
+                Qt.DescendingOrder if col == 0 or col == self._column_index("timestamp")
+                else Qt.AscendingOrder
+            )
+        self._refresh_table()
+
+    def _column_index(self, key: str) -> int:
+        selected_keys = self._selected_field_keys()
+        for idx, k in enumerate([SEV_COLUMN_KEY] + selected_keys):
+            if k == key:
+                return idx
+        return -1
+
+    def _sort_events(self, events: list[dict]) -> list[dict]:
+        selected_keys = self._selected_field_keys()
+        columns = [SEV_COLUMN_KEY] + selected_keys
+        if self._sort_column is None or self._sort_column >= len(columns):
+            return events
+        key_field = columns[self._sort_column]
+        reverse = self._sort_order == Qt.DescendingOrder
+
+        if key_field == SEV_COLUMN_KEY:
+            def sort_key(e):
+                return SEV_RANK.get(e.get("_severity"), -1)
+        elif key_field == "timestamp":
+            def sort_key(e):
+                return str(e.get("timestamp", ""))
+        elif key_field == "pid":
+            def sort_key(e):
+                try:
+                    return float(e.get("pid", 0))
+                except (TypeError, ValueError):
+                    return float("inf")
+        else:
+            def sort_key(e):
+                return str(e.get(key_field, "")).casefold()
+
+        return sorted(events, key=sort_key, reverse=reverse)
 
     def _on_field_selector_changed(self):
         selected = {key for key, cb in self.field_checkboxes.items() if cb.isChecked()}
@@ -736,7 +975,7 @@ class MainWindow(QMainWindow):
 
     def _on_table_clicked(self, index):
         """Open the Event Details view for the exact event in the clicked row."""
-        events = self._filtered_events()
+        events = self.__dict__.get("_table_events") or self._filtered_events()
         if index.row() < 0 or index.row() >= len(events):
             return
         event = events[index.row()]
@@ -757,7 +996,7 @@ class MainWindow(QMainWindow):
         self._set_connection_status(status)
 
     def _poll_queue(self):
-        table_needs_update = False
+        new_events = []
         while not self.event_queue.empty():
             try:
                 queue_item = self.event_queue.get_nowait()
@@ -771,18 +1010,54 @@ class MainWindow(QMainWindow):
                 raw_message = raw_event
                 structured = None
 
-            self.events.append(
-                self._normalize_event(received_at, source, raw_event, raw_message, structured)
-            )
+            event = self._normalize_event(received_at, source, raw_event, raw_message, structured)
+            self._classify_event(event)
+            new_events.append(event)
             self.event_counter += 1
-            table_needs_update = True
 
-        if table_needs_update:
-            if len(self.events) > MAX_EVENTS:
-                self.events = self.events[-MAX_EVENTS:]
-            self.event_count_lbl.setText(f"Events Received: {self.event_counter}")
-            self.side_event_count_lbl.setText(f"Events Received: {self.event_counter}")
+        if not new_events:
+            return
+
+        self.events.extend(new_events)
+        overflowed = len(self.events) > MAX_EVENTS
+        if overflowed:
+            self.events = self.events[-MAX_EVENTS:]
+
+        self.event_count_lbl.setText(f"Events Received: {self.event_counter}")
+        self.side_event_count_lbl.setText(f"Events Received: {self.event_counter}")
+
+        if self._can_append_incrementally() and not overflowed:
+            self._append_rows(new_events)
+        else:
             self._refresh_table()
+
+    def _can_append_incrementally(self) -> bool:
+        """True when new events can be appended without rebuilding the table."""
+        if self.__dict__.get("is_query_mode", False):
+            return False
+        if self.search_query.strip():
+            return False
+        if self.severity_filter is not None:
+            return False
+        if self._sort_column is not None:
+            return False
+        return True
+
+    def _append_rows(self, events: list[dict]):
+        """Incrementally append rows for new events (batched, no full rebuild)."""
+        selected_keys = self._selected_field_keys()
+        model = self.table_model
+        view = self.table_view
+        view.setUpdatesEnabled(False)
+        model.blockSignals(True)
+        try:
+            for event in events:
+                model.appendRow(self._build_row_items(event, selected_keys))
+                self._table_events.append(event)
+        finally:
+            view.setUpdatesEnabled(True)
+            model.blockSignals(False)
+        view.viewport().update()
 
     def _load_events_from_db(self):
         """Restore previously persisted events into the table on startup."""
@@ -817,6 +1092,11 @@ class MainWindow(QMainWindow):
             if not normalized.get("process") and row.get("process_name"):
                 normalized["process"] = row["process_name"]
 
+            # Surface the stored severity (numeric risk value) as a display
+            # field so the classifier and detail view can use it.
+            if row.get("severity") is not None and "severity" not in normalized:
+                normalized["severity"] = row["severity"]
+
             for key, value in row.items():
                 if key in skip_keys or key in self.known_fields:
                     continue
@@ -826,6 +1106,7 @@ class MainWindow(QMainWindow):
                 self.known_fields.add(key)
                 self._add_new_field(key, key.replace("_", " ").title())
 
+            self._classify_event(normalized)
             loaded.append(normalized)
 
         if not loaded:
@@ -930,26 +1211,41 @@ class MainWindow(QMainWindow):
             self.query_run_btn.setEnabled(True)
 
     def _display_query_results(self, result):
-        """Display query results in the table."""
-        # Use result columns if available, otherwise use selected fields
-        columns = result.columns if result.columns else self._selected_field_keys()
+        """Display query results in the table (with severity indicators)."""
+        columns = list(result.columns) if result.columns else self._selected_field_keys()
+        rows = result.rows
+        self._table_events = rows
+        for row in rows:
+            if "_severity" not in row:
+                self._classify_event(row)
 
-        self.table_model.clear()
-        self.table_model.setColumnCount(len(columns))
-        self.table_model.setHorizontalHeaderLabels(columns)
+        model = self.table_model
+        model.beginResetModel()
+        model.clear()
+        model.setColumnCount(len(columns) + 1)
+        model.setHorizontalHeaderLabels([SEV_COLUMN_KEY.title()] + columns)
+        for row_dict in rows:
+            model.appendRow(self._build_query_row_items(row_dict, columns))
+        model.endResetModel()
 
-        for row_dict in result.rows:
-            row_items = []
-            for col in columns:
-                value = row_dict.get(col, "")
-                item = QStandardItem(str(value) if value is not None else "")
-                item.setEditable(False)
-                row_items.append(item)
-            self.table_model.appendRow(row_items)
+        header = self.table_view.horizontalHeader()
+        for idx in range(len(columns) + 1):
+            header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
+        self._sync_sort_indicator()
+        self.table_view.viewport().update()
 
-        # Auto-size columns
-        for idx, col in enumerate(columns):
-            self.table_view.horizontalHeader().setSectionResizeMode(idx, QHeaderView.ResizeToContents)
+    def _build_query_row_items(self, row: dict, columns: list[str]) -> list[QStandardItem]:
+        sev = row.get("_severity")
+        pres = row.get("_severity_presentation") or {}
+        color = pres.get("color", "")
+        tint = self._severity_tint(color, critical=(sev == "critical"))
+        symbol = pres.get("symbol") or (sev.upper() if sev else "")
+        items = [
+            self._make_item(row, SEV_COLUMN_KEY, symbol, pres, tint, is_sev=True)
+        ]
+        for col in columns:
+            items.append(self._make_item(row, col, row.get(col, ""), pres, tint))
+        return items
 
     def _on_query_clear(self):
         """Clear the query and return to live mode."""
@@ -961,8 +1257,6 @@ class MainWindow(QMainWindow):
         self.search_query = ""
         self.search_input.clear()
         self._refresh_table()  # Return to live event display
-
-
     def closeEvent(self, event):
         self.socket_server_stop.set()
         try:

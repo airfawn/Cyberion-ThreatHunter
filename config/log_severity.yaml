@@ -1,0 +1,137 @@
+# =============================================================================
+# Cyberion — Log Severity Classification Configuration
+# =============================================================================
+#
+# This file drives how normalized security events are classified into one of
+# five severity levels and how those levels are presented in the UI.
+#
+# The UI / severity engine never contains hard-coded classification rules;
+# add or edit rules here without touching application code.
+#
+# RULE PRECEDENCE (documented behavior, enforced by the severity engine):
+#
+#   critical > bad > warning > info > good
+#
+# If multiple severity levels have a matching condition for the same event,
+# the HIGHEST severity wins. A level matches an event when ANY of its
+# conditions match; a single condition matches when ALL of its field/value
+# pairs match (AND within a condition, OR across conditions).
+#
+# CONDITION FIELD VALUES:
+#
+#   event_type: "authentication"                 exact match (case-insensitive)
+#   status: "success"                            exact match
+#   success: true                                boolean match
+#   suspicious: true                             boolean match
+#   confirmed: true                              boolean match
+#   severity: {op: gte, value: 3}                comparison / pattern
+#
+# Supported operators for the {op, value} dict form:
+#   eq, ne, gt, gte, lt, lte
+#   contains, startswith, endswith
+#   in, not_in            (value is a list)
+#   regex                 (value is a regular expression)
+#   exists, not_exists    (value ignored; matches on field presence)
+#
+# Field names are matched against the normalized event produced by the
+# backend event parser (event_type, process, pid, user, ip_address, message,
+# timestamp, source) plus any additional payload fields (status, success,
+# suspicious, severity, confirmed, hostname, ...).
+# =============================================================================
+
+documentation:
+  precedence: "critical > bad > warning > info > good"
+
+severity:
+  good:
+    label: GOOD
+    symbol: "\U0001F7E2"          # green circle
+    color: "#22C55E"
+    conditions:
+      - event_type: "authentication"
+        status: "success"
+      - event_type: "authentication"
+        success: true
+      - event_type: "process"
+        status: "normal"
+      - event_type: "process"
+        status: "success"
+      - event_type: "sudo"
+        status: "success"
+      - message: {op: contains, value: "authentication successful"}
+      - message: {op: contains, value: "session opened"}
+      - message: {op: contains, value: "audit:"}
+        status: "success"
+
+  info:
+    label: INFO
+    symbol: "\U0001F535"          # blue circle
+    color: "#3B82F6"
+    conditions:
+      - event_type: "system"
+      - event_type: "application"
+      - event_type: "syslog"
+      - event_type: "journald_log"
+      - event_type: "agent_info"
+      - event_type: "network"
+      - event_type: "file"
+      - event_type: "service"
+
+  warning:
+    label: WARNING
+    symbol: "\U0001F7E1"          # yellow circle
+    color: "#F59E0B"
+    conditions:
+      - event_type: "authentication"
+        status: "failure"
+      - event_type: "authentication"
+        success: false
+      - event_type: "process"
+        suspicious: true
+      - event_type: "command"
+        suspicious: true
+      - event_type: "command"
+        status: "unexpected"
+      - event_type: "privilege"
+        status: "changed"
+      - event_type: "sudo"
+        status: "failure"
+      - severity: {op: gte, value: 3}
+      - message: {op: contains, value: "authentication failure"}
+      - message: {op: contains, value: "failed password"}
+      - message: {op: contains, value: "permission denied"}
+      - message: {op: contains, value: "access denied"}
+
+  bad:
+    label: BAD
+    symbol: "\U0001F534"          # red circle
+    color: "#EF4444"
+    conditions:
+      - event_type: "detection"
+        severity: "high"
+      - event_type: "malware"
+      - event_type: "ransomware"
+      - event_type: "unauthorized_access"
+      - event_type: "exploit"
+      - event_type: "brute_force"
+      - event_type: "privilege_escalation"
+      - severity: {op: gte, value: 4}
+      - message: {op: contains, value: "malware"}
+      - message: {op: contains, value: "malicious"}
+      - message: {op: contains, value: "ransomware"}
+      - message: {op: regex, value: "cnc|command and control"}
+
+  critical:
+    label: CRITICAL
+    symbol: "\u26D4"              # prohibited sign
+    color: "#DC2626"
+    conditions:
+      - event_type: "detection"
+        severity: "critical"
+      - event_type: "ransomware"
+        confirmed: true
+      - event_type: "unauthorized_access"
+        confirmed: true
+      - message: {op: contains, value: "ransomware detected"}
+      - message: {op: contains, value: "critical alert"}
+      - severity: {op: gte, value: 5}

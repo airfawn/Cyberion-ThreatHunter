@@ -1,5 +1,8 @@
 # Core UI framework
 PyQt5>=5.15
 
+# Severity configuration (config/log_severity.yaml)
+PyYAML>=6.0
+
 # Optional test runner (used in `tests/test_collector.py`)
 pytest>=7.0
