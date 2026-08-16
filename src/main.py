@@ -11,13 +11,14 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QObject, QPropertyAnimation, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -41,8 +42,9 @@ try:
     from .event_repository import EventRepository  # type: ignore
     from .server import ServerThread  # type: ignore
     from .query import CyberionQueryEngine, QueryEngineError  # type: ignore
+    from .hunting import ThreatHuntingController  # type: ignore
     from .severity import load_severity_engine  # type: ignore
-    from .ui import SearchPage  # type: ignore
+    from .ui import SearchPage, ThreatHuntingPage  # type: ignore
     from .ui.alerts_page import AlertsPage  # type: ignore
     from .ui.detections_page import DetectionsPage  # type: ignore
     from .ui.theme import COLORS, theme_font, apply_global_theme  # type: ignore
@@ -51,8 +53,9 @@ except ImportError:
     from src.event_repository import EventRepository  # type: ignore
     from src.server import ServerThread  # type: ignore
     from src.query import CyberionQueryEngine, QueryEngineError  # type: ignore
+    from src.hunting import ThreatHuntingController  # type: ignore
     from src.severity import load_severity_engine  # type: ignore
-    from src.ui import SearchPage  # type: ignore
+    from src.ui import SearchPage, ThreatHuntingPage  # type: ignore
     from src.ui.alerts_page import AlertsPage  # type: ignore
     from src.ui.detections_page import DetectionsPage  # type: ignore
     from src.ui.theme import COLORS, theme_font, apply_global_theme  # type: ignore
@@ -253,9 +256,11 @@ class MainWindow(QMainWindow):
         self.db = CyberionDB()
         self.event_repo = EventRepository(db=self.db)
         self.query_engine = CyberionQueryEngine(self.db)
+        self.hunting_controller = ThreatHuntingController(self.db, self.query_engine)
         self.persistence_worker = EventPersistenceWorker(
             self.db, self.persist_queue, self.event_queue
         )
+        self._page_fade_animation = None
         
         # Query state
         self.current_query = ""
@@ -440,6 +445,7 @@ class MainWindow(QMainWindow):
         self.top_nav.addTab("Event Monitoring")
         self.top_nav.addTab("Alerts")
         self.top_nav.addTab("Detections")
+        self.top_nav.addTab("Threat Hunting")
         main_layout.addWidget(self.top_nav)
 
         self.main_stack = QStackedWidget()
@@ -447,9 +453,10 @@ class MainWindow(QMainWindow):
         self.main_stack.addWidget(self._build_event_monitor_page())
         self.main_stack.addWidget(self._build_alerts_page())
         self.main_stack.addWidget(self._build_detections_page())
+        self.main_stack.addWidget(self._build_threat_hunting_page())
         main_layout.addWidget(self.main_stack)
 
-        self.top_nav.currentChanged.connect(self.main_stack.setCurrentIndex)
+        self.top_nav.currentChanged.connect(self._on_nav_changed)
         self.top_nav.setCurrentIndex(0)
         return main_pane
 
@@ -560,6 +567,33 @@ class MainWindow(QMainWindow):
     def _build_detections_page(self) -> QWidget:
         """Build the Detections management page."""
         return DetectionsPage(detection_manager=self.db.detections, parent=self)
+
+    def _build_threat_hunting_page(self) -> QWidget:
+        """Build the analyst-driven threat hunting page."""
+        return ThreatHuntingPage(controller=self.hunting_controller, parent=self)
+
+    def _on_nav_changed(self, index: int) -> None:
+        self.main_stack.setCurrentIndex(index)
+        self._animate_page_transition()
+
+    def _animate_page_transition(self) -> None:
+        page = self.main_stack.currentWidget()
+        if page is None:
+            return
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(180)
+        anim.setStartValue(0.55)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _cleanup():
+            page.setGraphicsEffect(None)
+
+        anim.finished.connect(_cleanup)
+        self._page_fade_animation = anim
+        anim.start()
 
     def _apply_styles(self):
         app = QApplication.instance()

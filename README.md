@@ -38,3 +38,26 @@ THREATHUNTER_SERVER_HOST=127.0.0.1 THREATHUNTER_PORT=9090 python3 -m Agent.conne
 VM agent connecting to host machine:
 THREATHUNTER_BIND_HOST=0.0.0.0 THREATHUNTER_PORT=9090 python3 -m src.main
 THREATHUNTER_SERVER_HOST=<HOST_MACHINE_IP> THREATHUNTER_PORT=9090 python3 -m Agent.connector
+
+Threat Hunting page:
+
+- A dedicated Threat Hunting tab is available in the top navigation.
+- Hunts are hypothesis-driven and run in background threads, so the UI remains responsive.
+- Investigation outputs include suspicious events, correlation timeline, extracted indicators, optional IP enrichment, and analyst conclusion text.
+- Hypotheses are persisted in data/threat_hypotheses.json.
+- Investigation snapshots are persisted in data/threat_investigations.json.
+
+Optional IP reputation configuration:
+
+- THREATHUNTER_IPREP_API_URL: endpoint URL (use {ip} placeholder or query param style)
+- THREATHUNTER_IPREP_API_KEY: bearer token for the configured service (optional if service does not require auth)
+- THREATHUNTER_IPREP_SOURCE: display name for the external source (default: Configured Reputation API)
+- THREATHUNTER_IPREP_TIMEOUT: HTTP timeout seconds for enrichment calls (default: 4)
+
+Example:
+THREATHUNTER_IPREP_API_URL=https://example-intel.local/reputation/{ip} THREATHUNTER_IPREP_API_KEY=<token> python3 -m src.main
+
+Run tests:
+
+- Core threat hunting tests: pytest -q tests/test_threat_hunting.py
+- Regression tests used during implementation: pytest -q tests/test_detections.py tests/test_alerts.py tests/test_query_language.py

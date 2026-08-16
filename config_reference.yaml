@@ -1,0 +1,75 @@
+# Cyberion Agent configuration reference
+# This file is for user reference only.
+
+server:
+  # Target server host/IP for the agent to connect to.
+  host: 127.0.0.1
+  # Target server TCP port.
+  port: 9090
+
+collector:
+  # Poll/collection interval in seconds.
+  interval: 10
+
+  # Source selection can be either:
+  # 1) a list (single effective source set)
+  # 2) an OS-keyed map (recommended)
+  # Keys supported: default, windows, macos, linux
+  sources:
+    default:
+      - journald
+      - syslog
+      - auth
+      - kern
+      - audit
+    windows:
+      - windows_security
+      - sysmon
+      - powershell
+      - defender
+      - firewall
+    macos:
+      - endpointsecurity_process
+      - endpointsecurity_file
+      - endpointsecurity_network
+      - unifiedlog_auth
+      - unifiedlog_system
+      - unifiedlog_app
+    linux:
+      - journald
+      - syslog
+      - auth
+      - kern
+      - audit
+
+runtime:
+  # Auto-populated by the agent at startup.
+  # You can leave these as auto; values are updated automatically.
+  os: auto
+  os_name: auto
+  architecture: auto
+  hostname: auto
+  last_detected_at: auto
+
+autostart:
+  # Reference only; autostart is installed via:
+  # python -m Agent.connector --install-autostart
+  enabled: false
+
+normalization:
+  # Agent normalizes different OS logs into this canonical event model.
+  schema:
+    timestamp: "2026-08-16T12:34:56.000000Z"
+    host: "workstation-01"
+    os: "windows|macos|linux"
+    architecture: "x86_64|arm64"
+    event_type: "process_create|network_connection|auth_event|..."
+    process_name: "powershell.exe"
+    pid: 4812
+    ppid: 3920
+    user: "admin"
+    command_line: "powershell -enc ..."
+    source_ip: "10.0.0.11"
+    destination_ip: "8.8.8.8"
+    source: "windows_security|sysmon|unifiedlog_auth|..."
+    message: "original source log line or message"

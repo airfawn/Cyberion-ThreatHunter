@@ -1,10 +1,31 @@
 server:
   host: 192.168.1.10
   port: 9090
-
 collector:
   interval: 10
   sources:
-    - syslog
-    - auth
-    - kern
+    default:
+      - journald
+      - syslog
+      - auth
+      - kern
+      - audit
+    windows:
+      - windows_security
+      - sysmon
+      - powershell
+      - defender
+      - firewall
+    macos:
+      - endpointsecurity_process
+      - endpointsecurity_file
+      - endpointsecurity_network
+      - unifiedlog_auth
+      - unifiedlog_system
+      - unifiedlog_app
+runtime:
+  os: auto
+  os_name: auto
+  architecture: auto
+  hostname: auto
+  last_detected_at: auto

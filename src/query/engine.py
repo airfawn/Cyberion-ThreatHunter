@@ -120,20 +120,28 @@ class CyberionQueryEngine:
         Returns:
             (rows, columns) where rows is a list of dicts and columns is a list of field names.
         """
-        cur = self.db.conn.cursor()
+        lock = getattr(self.db, "_lock", None)
 
-        # Execute the query
-        cur.execute(sql, params)
+        def _run_query() -> tuple:
+            cur = self.db.conn.cursor()
 
-        # Get column names
-        columns = [desc[0] for desc in cur.description] if cur.description else []
+            # Execute the query
+            cur.execute(sql, params)
 
-        # Fetch all rows as dictionaries
-        rows = []
-        for row in cur.fetchall():
-            row_dict = {}
-            for i, col in enumerate(columns):
-                row_dict[col] = row[i]
-            rows.append(row_dict)
+            # Get column names
+            columns = [desc[0] for desc in cur.description] if cur.description else []
 
-        return rows, columns
+            # Fetch all rows as dictionaries
+            rows = []
+            for row in cur.fetchall():
+                row_dict = {}
+                for i, col in enumerate(columns):
+                    row_dict[col] = row[i]
+                rows.append(row_dict)
+
+            return rows, columns
+
+        if lock is not None:
+            with lock:
+                return _run_query()
+        return _run_query()

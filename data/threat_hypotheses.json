@@ -1,0 +1,31 @@
+[
+  {
+    "hypothesis_id": "hyp-e70ec48e21",
+    "name": "Encoded PowerShell Execution Hunt",
+    "description": "Look for encoded command usage in PowerShell process activity.",
+    "reason": "Encoded command execution can indicate obfuscation or malicious staging.",
+    "data_sources": [
+      "events"
+    ],
+    "query_kql": "events | where process_name contains \"powershell\" or command contains \"-enc\" or command contains \"EncodedCommand\" | sort by timestamp desc | take 150",
+    "indicators_to_extract": [
+      "ip_address",
+      "pid",
+      "ppid",
+      "process_name",
+      "user",
+      "hostname",
+      "filepath",
+      "command",
+      "timestamp",
+      "hash"
+    ],
+    "expected_behavior": "PowerShell with encoded command lines and follow-on process/network activity",
+    "mitre_technique": "T1059.001",
+    "severity": "medium",
+    "confidence": 0.5,
+    "status": "active",
+    "created_at": "2026-08-16T16:09:05.071014+00:00",
+    "updated_at": "2026-08-16T16:09:05.071042+00:00"
+  }
+]

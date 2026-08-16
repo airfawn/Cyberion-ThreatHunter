@@ -4,6 +4,7 @@ from .visual_query_builder import VisualQueryBuilder, ConditionRow
 from .search_page import SearchPage
 from .alerts_page import AlertsPage
 from .detections_page import DetectionsPage
+from .threat_hunting_page import ThreatHuntingPage
 
 __all__ = [
     "VisualQueryBuilder",
@@ -11,4 +12,5 @@ __all__ = [
     "SearchPage",
     "AlertsPage",
     "DetectionsPage",
+    "ThreatHuntingPage",
 ]

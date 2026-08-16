@@ -16,7 +16,7 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None
 
-from .collector import Collector, gather_initial_data
+from .collector import Collector, detect_runtime_platform, gather_initial_data
 from .log_queue import LogQueue, LogSender, LogEntry
 
 
@@ -61,6 +61,32 @@ def load_agent_config(config_path: str | os.PathLike[str] | None = None) -> dict
     return loaded
 
 
+def update_runtime_metadata(config: dict[str, Any], config_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Populate runtime OS/architecture fields in config and persist them."""
+    runtime = detect_runtime_platform()
+    runtime_cfg = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
+    runtime_cfg.update(
+        {
+            "os": runtime.get("os_family", "linux"),
+            "os_name": runtime.get("os_name", ""),
+            "architecture": runtime.get("architecture", ""),
+            "hostname": runtime.get("hostname", ""),
+            "last_detected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+    )
+    config["runtime"] = runtime_cfg
+
+    config_file = Path(config_path or os.getenv("THREATHUNTER_AGENT_CONFIG") or _default_config_path())
+    if yaml is not None:
+        try:
+            with config_file.open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(config, handle, sort_keys=False)
+        except Exception as exc:
+            print(f"[Agent] Failed to write runtime metadata to {config_file}: {exc}")
+
+    return config
+
+
 def resolve_agent_target(config: dict[str, Any] | None = None) -> tuple[str, int]:
     """Resolve agent destination from config, environment variables, or defaults."""
     config = config or load_agent_config()
@@ -86,12 +112,39 @@ def resolve_agent_target(config: dict[str, Any] | None = None) -> tuple[str, int
 def resolve_collector_sources(config: dict[str, Any] | None = None) -> list[str]:
     config = config or load_agent_config()
     collector_cfg = config.get("collector", {}) if isinstance(config.get("collector"), dict) else {}
+
+    runtime_cfg = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
+    os_name = str(runtime_cfg.get("os") or detect_runtime_platform().get("os_family") or "linux").lower()
+
     sources = collector_cfg.get("sources") or []
+    if isinstance(sources, dict):
+        os_specific = sources.get(os_name)
+        default_sources = sources.get("default")
+        sources = os_specific if os_specific is not None else default_sources or []
     if isinstance(sources, str):
         sources = [sources]
     if not isinstance(sources, list):
         return []
     return [str(source) for source in sources if str(source)]
+
+
+def resolve_os_source_map(config: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    config = config or load_agent_config()
+    collector_cfg = config.get("collector", {}) if isinstance(config.get("collector"), dict) else {}
+    raw = collector_cfg.get("sources") or {}
+
+    if isinstance(raw, dict):
+        result: dict[str, list[str]] = {}
+        for key, values in raw.items():
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list):
+                result[str(key).lower()] = [str(item) for item in values if str(item)]
+        return result
+
+    selected = resolve_collector_sources(config)
+    runtime_os = str((config.get("runtime") or {}).get("os") or detect_runtime_platform().get("os_family") or "linux").lower()
+    return {runtime_os: selected}
 
 
 class connector:
@@ -100,6 +153,8 @@ class connector:
         self.server_port = server_port
         self.config = config or load_agent_config()
         self.collector_sources = resolve_collector_sources(self.config)
+        self.os_sources = resolve_os_source_map(self.config)
+        self.runtime_info = detect_runtime_platform()
         self.socket = None
         self.reconnect_delay = _get_env_int("THREATHUNTER_RECONNECT_DELAY", 3)
 
@@ -178,9 +233,13 @@ class connector:
         """Start the log collector thread."""
         if self.collector is not None:
             return
-        self.collector = Collector(send_callback=self._queue_collected_event, interval=self.collector_interval)
-        if self.collector_sources:
-            self.collector.selected_sources = self.collector_sources
+        self.collector = Collector(
+            send_callback=self._queue_collected_event,
+            interval=self.collector_interval,
+            selected_sources=self.collector_sources,
+            os_sources=self.os_sources,
+            runtime_info=self.runtime_info,
+        )
         self.collector.start()
         print("[Agent] Log collector started")
 
@@ -315,9 +374,55 @@ def install_autostart_windows() -> bool:
     return True
 
 
+def install_autostart_macos() -> bool:
+    """Install a launch agent plist for macOS autostart."""
+    if platform.system() != "Darwin":
+        return False
+    launch_agents = Path.home() / "Library/LaunchAgents"
+    launch_agents.mkdir(parents=True, exist_ok=True)
+    plist = launch_agents / "com.cyberion.agent.plist"
+    config_path = Path(os.getenv("THREATHUNTER_AGENT_CONFIG") or _default_config_path())
+    program_args = [sys.executable, "-m", "Agent.connector", "--config", str(config_path)]
+    program_xml = "".join(f"\n        <string>{arg}</string>" for arg in program_args)
+
+    content = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>com.cyberion.agent</string>
+    <key>ProgramArguments</key>
+    <array>{program_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>THREATHUNTER_AGENT_CONFIG</key>
+        <string>{config_path}</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{Path(__file__).resolve().parent.parent}</string>
+    <key>StandardOutPath</key>
+    <string>{Path.home() / 'Library/Logs/cyberion-agent.log'}</string>
+    <key>StandardErrorPath</key>
+    <string>{Path.home() / 'Library/Logs/cyberion-agent.err.log'}</string>
+</dict>
+</plist>
+"""
+    plist.write_text(content, encoding="utf-8")
+    subprocess.run(["launchctl", "unload", str(plist)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["launchctl", "load", str(plist)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
 def install_autostart() -> bool:
     if platform.system() == "Windows":
         return install_autostart_windows()
+    if platform.system() == "Darwin":
+        return install_autostart_macos()
     return install_autostart_linux()
 
 
@@ -336,6 +441,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     config = load_agent_config(config_path)
+    config = update_runtime_metadata(config, config_path=config_path)
     target_host, target_port = resolve_agent_target(config)
     print(f"Starting agent; target server {target_host}:{target_port}")
     conn = connector(server_ip=target_host, server_port=target_port, config=config)
