@@ -33,6 +33,8 @@ class ComparisonOperator(Enum):
     NOT_CONTAINS = "not_contains"
     STARTS_WITH = "starts_with"
     ENDS_WITH = "ends_with"
+    REGEX = "regex"
+    NOT_REGEX = "not_regex"
     IS_EMPTY = "is_empty"
     IS_NOT_EMPTY = "is_not_empty"
 
@@ -93,6 +95,8 @@ VALID_OPERATORS_BY_TYPE = {
         ComparisonOperator.NOT_CONTAINS,
         ComparisonOperator.STARTS_WITH,
         ComparisonOperator.ENDS_WITH,
+        ComparisonOperator.REGEX,
+        ComparisonOperator.NOT_REGEX,
         ComparisonOperator.IS_EMPTY,
         ComparisonOperator.IS_NOT_EMPTY,
     ],

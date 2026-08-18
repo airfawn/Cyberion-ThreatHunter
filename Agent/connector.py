@@ -91,14 +91,21 @@ def resolve_agent_target(config: dict[str, Any] | None = None) -> tuple[str, int
     """Resolve agent destination from config, environment variables, or defaults."""
     config = config or load_agent_config()
     server_cfg = config.get("server", {}) if isinstance(config.get("server"), dict) else {}
-    server_host = server_cfg.get("host") or os.getenv("THREATHUNTER_SERVER_HOST")
+
+    # Environment variables intentionally take precedence so operators can
+    # redirect agents at runtime without editing YAML.
+    server_host = (
+        os.getenv("THREATHUNTER_SERVER_HOST")
+        or os.getenv("THREATHUNTER_HOST_SERVER")
+        or server_cfg.get("host")
+    )
     if server_host:
         host = str(server_host)
     else:
         bind_host = os.getenv("THREATHUNTER_BIND_HOST", "0.0.0.0")
         host = "127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host
 
-    port_value = server_cfg.get("port") or os.getenv("THREATHUNTER_PORT")
+    port_value = os.getenv("THREATHUNTER_PORT") or server_cfg.get("port")
     if port_value is None:
         port = 9090
     else:
@@ -157,6 +164,7 @@ class connector:
         self.runtime_info = detect_runtime_platform()
         self.socket = None
         self.reconnect_delay = _get_env_int("THREATHUNTER_RECONNECT_DELAY", 3)
+        self.connect_timeout = self._resolve_connect_timeout()
 
         # Agent identity
         self.agent_id = str(__import__('uuid').getnode())
@@ -177,6 +185,7 @@ class connector:
         self.collector = None
         self._running = False
         self._initial_data_sent = False
+        self._sender_active = False
         self.collector_interval = self._resolve_collector_interval()
 
         # Heartbeat
@@ -189,9 +198,18 @@ class connector:
             self.close_socket()
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            self.socket.settimeout(self.connect_timeout)
             self.socket.connect((self.server_ip, self.server_port))
+            self.socket.settimeout(None)
             print(f"Agent connected to server at {self.server_ip}:{self.server_port}")
             return True
+        except socket.timeout:
+            self.close_socket()
+            print(
+                f"Connection timeout after {self.connect_timeout}s to "
+                f"{self.server_ip}:{self.server_port}."
+            )
+            return False
         except Exception as e:
             self.close_socket()
             print(f"Connection error: {e}")
@@ -229,6 +247,17 @@ class connector:
         except ValueError:
             return 10
 
+    def _resolve_connect_timeout(self) -> float:
+        server_cfg = self.config.get("server", {}) if isinstance(self.config.get("server"), dict) else {}
+        raw = server_cfg.get("connect_timeout")
+        if raw is None:
+            raw = os.getenv("THREATHUNTER_CONNECT_TIMEOUT", "8")
+        try:
+            timeout = float(raw)
+        except (TypeError, ValueError):
+            timeout = 8.0
+        return min(max(timeout, 1.0), 60.0)
+
     def _start_collector(self):
         """Start the log collector thread."""
         if self.collector is not None:
@@ -249,6 +278,13 @@ class connector:
             self.collector.stop()
             self.collector = None
             print("[Agent] Log collector stopped")
+
+    def _teardown_connection_runtime(self):
+        """Stop background workers tied to a live server connection."""
+        self._stop_collector()
+        if self._sender_active:
+            self.log_sender.stop()
+            self._sender_active = False
 
     def _queue_collected_event(self, event: dict):
         """Callback for collector to queue events."""
@@ -281,8 +317,7 @@ class connector:
                 # Connect if not connected
                 if self.socket is None:
                     self._initial_data_sent = False
-                    self._stop_collector()
-                    self.log_sender.stop()
+                    self._teardown_connection_runtime()
                     if not self.connect():
                         time.sleep(self.reconnect_delay)
                         continue
@@ -298,6 +333,7 @@ class connector:
                     self._start_collector()
                     # Start log sender with this socket for receiving ACKs
                     self.log_sender.start(recv_socket=self.socket)
+                    self._sender_active = True
 
                 # Send heartbeat if interval elapsed
                 self._maybe_send_heartbeat()
@@ -310,8 +346,7 @@ class connector:
             print("Stopping agent.")
         finally:
             self._running = False
-            self._stop_collector()
-            self.log_sender.stop()
+            self._teardown_connection_runtime()
             self.close_socket()
 
     def _maybe_send_heartbeat(self):

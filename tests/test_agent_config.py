@@ -53,6 +53,46 @@ server:
     assert port == 7777
 
 
+def test_resolve_agent_target_prefers_env_over_yaml(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "agent.yaml"
+    config_path.write_text(
+        """
+server:
+  host: 10.2.3.4
+  port: 7777
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("THREATHUNTER_AGENT_CONFIG", str(config_path))
+    monkeypatch.setenv("THREATHUNTER_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setenv("THREATHUNTER_PORT", "9090")
+    host, port = resolve_agent_target()
+
+    assert host == "127.0.0.1"
+    assert port == 9090
+
+
+def test_resolve_agent_target_supports_legacy_host_env(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "agent.yaml"
+    config_path.write_text(
+        """
+server:
+  host: 10.2.3.4
+  port: 7777
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("THREATHUNTER_AGENT_CONFIG", str(config_path))
+    monkeypatch.delenv("THREATHUNTER_SERVER_HOST", raising=False)
+    monkeypatch.setenv("THREATHUNTER_HOST_SERVER", "127.0.0.2")
+    host, port = resolve_agent_target()
+
+    assert host == "127.0.0.2"
+    assert port == 7777
+
+
 def test_resolve_collector_sources_by_os(tmp_path: Path):
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(

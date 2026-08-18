@@ -6,6 +6,8 @@ server:
   host: 127.0.0.1
   # Target server TCP port.
   port: 9090
+  # TCP connect timeout (seconds) before retry.
+  connect_timeout: 8
 
 collector:
   # Poll/collection interval in seconds.

@@ -61,3 +61,27 @@ Run tests:
 
 - Core threat hunting tests: pytest -q tests/test_threat_hunting.py
 - Regression tests used during implementation: pytest -q tests/test_detections.py tests/test_alerts.py tests/test_query_language.py
+
+Sigma rule importer:
+
+- Alert Rules page includes an Import Sigma button.
+- Supports single or multiple Sigma YAML files.
+- Conversion pipeline: parse -> validate -> normalize IR -> field/logsource mapping -> local rule generation.
+- Duplicate Sigma IDs are tracked and can be updated on re-import.
+- Import tracking table: sigma_imports (sigma_id, local_rule_id, sigma_modified_date, last_imported, conversion_version).
+
+Sigma CLI:
+
+- Validate: python3 -m src.sigma.cli validate path/to/rule.yml
+- Convert preview: python3 -m src.sigma.cli convert path/to/rule.yml
+- Import one file: python3 -m src.sigma.cli import path/to/rule.yml
+- Import directory: python3 -m src.sigma.cli import ./sigma-rules/
+- Update existing IDs: python3 -m src.sigma.cli import ./sigma-rules/ --update-existing
+
+Sigma mapping config:
+
+- Optional mapping override file: config/sigma_field_map.yaml
+
+Server IP localhost toggle:
+
+- In the main UI Settings panel, the localhost checkbox sets Server IP to 127.0.0.1.

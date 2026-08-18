@@ -38,6 +38,11 @@ class QueryModelToKQL:
         ComparisonOperator.NOT_CONTAINS: "!contains",
         ComparisonOperator.STARTS_WITH: "startswith",
         ComparisonOperator.ENDS_WITH: "endswith",
+        # The query language does not yet implement regex; map to contains
+        # for preview compatibility while local detection evaluation uses
+        # native regex support.
+        ComparisonOperator.REGEX: "contains",
+        ComparisonOperator.NOT_REGEX: "!contains",
         ComparisonOperator.IS_EMPTY: "isnull",
         ComparisonOperator.IS_NOT_EMPTY: "!isnull",
     }

@@ -11,11 +11,12 @@ from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QStandardItemModel, QStandardItem
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableView,
-    QTabWidget, QMessageBox, QMenu, QApplication, QLabel
+    QTabWidget, QMessageBox, QMenu, QApplication, QLabel, QFileDialog, QDialog, QTextEdit
 )
 
 from ..alerts import AlertRule, AlertSeverity
 from ..alerts.manager import AlertManager
+from ..sigma.importer import SigmaRuleImporter
 from .alert_editor import AlertRuleEditor
 from .theme import COLORS, theme_font
 
@@ -42,6 +43,7 @@ class AlertsPage(QWidget):
         """
         super().__init__(parent)
         self.alert_manager = alert_manager
+        self.sigma_importer = SigmaRuleImporter(alert_manager)
         
         self._build_ui()
         self._apply_styles()
@@ -97,6 +99,11 @@ class AlertsPage(QWidget):
         self.create_btn.clicked.connect(self._on_create_rule)
         
         layout.addWidget(self.create_btn)
+
+        self.import_sigma_btn = QPushButton("Import Sigma")
+        self.import_sigma_btn.clicked.connect(self._on_import_sigma)
+        layout.addWidget(self.import_sigma_btn)
+
         layout.addStretch()
         
         return layout
@@ -356,6 +363,123 @@ class AlertsPage(QWidget):
                 logger.info(f"Deleted alert rule: {rule.name}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to delete rule: {e}")
+
+    def _on_import_sigma(self):
+        """Import Sigma YAML rules and convert into local alert rules."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Sigma Rule Files",
+            "",
+            "YAML Files (*.yml *.yaml)",
+        )
+        if not paths:
+            return
+
+        validation_results = []
+        for path in paths:
+            try:
+                validation_results.extend(self.sigma_importer.validate_file(path))
+            except Exception as exc:
+                QMessageBox.critical(self, "Sigma Validation Error", f"Failed to validate {path}: {exc}")
+                return
+
+        preview_text = self._format_sigma_results(validation_results, header_prefix="Validation")
+        preview = QDialog(self)
+        preview.setWindowTitle("Sigma Conversion Preview")
+        preview.resize(860, 560)
+        p_layout = QVBoxLayout(preview)
+        box = QTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(preview_text)
+        p_layout.addWidget(box, 1)
+
+        action_row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(preview.reject)
+        action_row.addWidget(cancel_btn)
+
+        update_existing = False
+
+        def _import_new_only():
+            nonlocal update_existing
+            update_existing = False
+            preview.accept()
+
+        def _import_update_existing():
+            nonlocal update_existing
+            update_existing = True
+            preview.accept()
+
+        import_btn = QPushButton("Import New")
+        import_btn.setObjectName("primaryButton")
+        import_btn.clicked.connect(_import_new_only)
+        action_row.addWidget(import_btn)
+
+        update_btn = QPushButton("Import / Update Existing")
+        update_btn.clicked.connect(_import_update_existing)
+        action_row.addWidget(update_btn)
+
+        p_layout.addLayout(action_row)
+
+        if preview.exec_() != QDialog.Accepted:
+            return
+
+        results = []
+        for path in paths:
+            try:
+                results.extend(self.sigma_importer.import_file(path, update_existing=update_existing))
+            except Exception as exc:
+                QMessageBox.critical(self, "Sigma Import Error", f"Failed to import {path}: {exc}")
+                return
+
+        self._show_sigma_import_summary(results)
+        self._refresh_data()
+
+    def _format_sigma_results(self, results, header_prefix: str = "Summary") -> str:
+        imported = 0
+        failed = 0
+        warnings = 0
+        lines = []
+        for result in results:
+            if result.errors:
+                failed += 1
+            else:
+                imported += 1
+            if result.warnings:
+                warnings += 1
+
+            lines.append(
+                f"[{result.status.value}] {result.sigma_title or 'Untitled'} "
+                f"(sigma_id={result.sigma_id or 'n/a'}, local_rule_id={result.local_rule_id or 'n/a'})"
+            )
+            if result.local_rule is not None:
+                lines.append(f"  Local rule preview: name={result.local_rule.name}, severity={result.local_rule.severity.value}")
+            for msg in result.errors:
+                lines.append(f"  ERROR: {msg}")
+            for msg in result.warnings:
+                lines.append(f"  WARNING: {msg}")
+
+        header = f"{header_prefix} results -> Ready: {imported}  Invalid/Unsupported: {failed}  With warnings: {warnings}"
+        return header + "\n\n" + "\n".join(lines)
+
+    def _show_sigma_import_summary(self, results):
+        text = self._format_sigma_results(results, header_prefix="Import")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sigma Import Summary")
+        dialog.resize(860, 540)
+        layout = QVBoxLayout(dialog)
+        box = QTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(text)
+        layout.addWidget(box, 1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+        dialog.exec_()
     
     def closeEvent(self, event):
         """Clean up on close."""

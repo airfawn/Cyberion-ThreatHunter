@@ -1,0 +1,18 @@
+# Optional override map for Sigma -> Cyberion field translation.
+# Keys are Sigma field names; values are Cyberion query-model fields.
+field_map:
+  Image: process_name
+  CommandLine: command
+  ParentImage: parent_process
+  User: user
+  ProcessId: pid
+  ParentProcessId: ppid
+  TargetFilename: filepath
+  FileName: filepath
+  HostName: hostname
+  ComputerName: hostname
+  SourceIp: ip_address
+  DestinationIp: ip_address
+  IpAddress: ip_address
+  EventType: event_type
+  Message: message

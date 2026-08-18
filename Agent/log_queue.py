@@ -218,12 +218,17 @@ class LogSender:
 
     def stop(self):
         """Stop sender and receiver threads."""
+        sender_was_running = bool(self._sender_thread and self._sender_thread.is_alive())
+        receiver_was_running = bool(self._receiver_thread and self._receiver_thread.is_alive())
         self._stop_event.set()
         if self._sender_thread:
             self._sender_thread.join(timeout=5)
         if self._receiver_thread:
             self._receiver_thread.join(timeout=5)
-        print("[Agent] Log sender stopped")
+        if sender_was_running or receiver_was_running:
+            print("[Agent] Log sender stopped")
+        self._sender_thread = None
+        self._receiver_thread = None
 
     def _send_loop(self):
         """Main sending loop - batches logs and sends packets."""

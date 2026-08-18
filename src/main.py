@@ -415,6 +415,11 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(ip_label)
         settings_layout.addWidget(self.server_ip_edit)
 
+        self.localhost_checkbox = QCheckBox("localhost")
+        self.localhost_checkbox.setChecked(self.server_host == "127.0.0.1")
+        self.localhost_checkbox.stateChanged.connect(self._on_localhost_toggled)
+        settings_layout.addWidget(self.localhost_checkbox)
+
         port_label = QLabel("Server Port")
         port_label.setProperty("secondary", True)
         self.server_port_edit = QLineEdit(str(self.server_port))
@@ -433,6 +438,10 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(settings_card)
 
         return self.side_panel
+
+    def _on_localhost_toggled(self, state: int) -> None:
+        if state == Qt.Checked:
+            self.server_ip_edit.setText("127.0.0.1")
 
     def _build_content_area(self) -> QWidget:
         main_pane = QWidget()

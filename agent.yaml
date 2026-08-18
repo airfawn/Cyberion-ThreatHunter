@@ -1,31 +1,32 @@
 server:
   host: 192.168.1.10
   port: 9090
+  connect_timeout: 8
 collector:
   interval: 10
   sources:
     default:
-      - journald
-      - syslog
-      - auth
-      - kern
-      - audit
+    - journald
+    - syslog
+    - auth
+    - kern
+    - audit
     windows:
-      - windows_security
-      - sysmon
-      - powershell
-      - defender
-      - firewall
+    - windows_security
+    - sysmon
+    - powershell
+    - defender
+    - firewall
     macos:
-      - endpointsecurity_process
-      - endpointsecurity_file
-      - endpointsecurity_network
-      - unifiedlog_auth
-      - unifiedlog_system
-      - unifiedlog_app
+    - endpointsecurity_process
+    - endpointsecurity_file
+    - endpointsecurity_network
+    - unifiedlog_auth
+    - unifiedlog_system
+    - unifiedlog_app
 runtime:
-  os: auto
-  os_name: auto
-  architecture: auto
-  hostname: auto
-  last_detected_at: auto
+  os: macos
+  os_name: Darwin
+  architecture: arm64
+  hostname: Adithyas-MacBook-Air.local
+  last_detected_at: '2026-08-18T13:42:58.763269Z'

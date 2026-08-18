@@ -1,6 +1,7 @@
 """Detection engine for evaluating normalized events against active rules."""
 
 import logging
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,6 +106,10 @@ class DetectionEngine:
             return str(value).lower().startswith(str(condition.value).lower())
         if operator == ComparisonOperator.ENDS_WITH:
             return str(value).lower().endswith(str(condition.value).lower())
+        if operator == ComparisonOperator.REGEX:
+            return self._safe_regex_match(str(condition.value), str(value))
+        if operator == ComparisonOperator.NOT_REGEX:
+            return not self._safe_regex_match(str(condition.value), str(value))
         if operator == ComparisonOperator.GREATER_THAN:
             try:
                 return float(value) > float(condition.value)
@@ -155,6 +160,16 @@ class DetectionEngine:
             if isinstance(structured, dict) and alias in structured:
                 return structured[alias]
         return None
+
+    def _safe_regex_match(self, pattern: str, candidate: str) -> bool:
+        # Guardrails for untrusted imported patterns.
+        if not pattern or len(pattern) > 256:
+            return False
+        text = candidate if len(candidate) <= 4000 else candidate[:4000]
+        try:
+            return re.search(pattern, text, flags=re.IGNORECASE) is not None
+        except re.error:
+            return False
 
     def _create_alert_for_detection(self, detection, rule: AlertRule, event_id: Optional[int]) -> None:
         """Create a persisted alert entry for the detection via the existing alert system."""
