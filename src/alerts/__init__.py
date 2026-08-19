@@ -36,6 +36,17 @@ class ActionStatus(Enum):
     PENDING = "pending"
 
 
+class AlertLifecycleStatus(Enum):
+    """Analyst lifecycle state for triggered alerts."""
+    OPEN = "open"
+    NEW = "new"
+    ACKNOWLEDGED = "acknowledged"
+    INVESTIGATING = "investigating"
+    ESCALATED = "escalated"
+    RESOLVED = "resolved"
+    FALSE_POSITIVE = "false_positive"
+
+
 class DetectionType(Enum):
     """Supported detection evaluation modes."""
     SINGLE_EVENT = "single_event"
@@ -214,6 +225,10 @@ class AlertHistoryRecord:
     action_status: ActionStatus = ActionStatus.PENDING
     action_executed_at: Optional[str] = None
     error_message: Optional[str] = None
+    lifecycle_status: AlertLifecycleStatus = AlertLifecycleStatus.OPEN
+    assignee: Optional[str] = None
+    note: Optional[str] = None
+    updated_at: Optional[str] = None
     
     def to_dict(self) -> dict:
         """Serialize to dict."""
@@ -228,6 +243,10 @@ class AlertHistoryRecord:
             "action_status": self.action_status.value,
             "action_executed_at": self.action_executed_at,
             "error_message": self.error_message,
+            "lifecycle_status": self.lifecycle_status.value,
+            "assignee": self.assignee,
+            "note": self.note,
+            "updated_at": self.updated_at,
         }
     
     @classmethod
@@ -244,6 +263,10 @@ class AlertHistoryRecord:
             action_status=ActionStatus(data.get("action_status", "pending")),
             action_executed_at=data.get("action_executed_at"),
             error_message=data.get("error_message"),
+            lifecycle_status=AlertLifecycleStatus(data.get("lifecycle_status", "open")),
+            assignee=data.get("assignee"),
+            note=data.get("note"),
+            updated_at=data.get("updated_at"),
         )
 
 
@@ -253,6 +276,7 @@ __all__ = [
     "ActionType",
     "ActionConfig",
     "ActionStatus",
+    "AlertLifecycleStatus",
     "DetectionType",
     "TimeUnit",
     "ThresholdConfig",

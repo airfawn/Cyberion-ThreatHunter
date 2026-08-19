@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from . import AlertRule, AlertStatistics, AlertHistoryRecord, ActionType
+from . import AlertRule, AlertStatistics, AlertHistoryRecord, ActionType, AlertLifecycleStatus
 
 
 class AlertPersistenceError(Exception):
@@ -100,8 +100,15 @@ class AlertManager:
                 "CREATE INDEX IF NOT EXISTS idx_alert_history_triggered "
                 "ON alert_history(triggered_at)"
             )
-
+            
+            # Migrate schema first to ensure columns exist before creating indexes
             self._migrate_schema(cur)
+            
+            # Now create indexes (lifecycle_status column should exist now)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alert_history_lifecycle "
+                "ON alert_history(lifecycle_status)"
+            )
             
             self.conn.commit()
 
@@ -122,6 +129,22 @@ class AlertManager:
             cur.execute("ALTER TABLE alert_history ADD COLUMN event_ids TEXT")
         if "group_key" not in history_cols:
             cur.execute("ALTER TABLE alert_history ADD COLUMN group_key TEXT")
+        if "lifecycle_status" not in history_cols:
+            cur.execute("ALTER TABLE alert_history ADD COLUMN lifecycle_status TEXT DEFAULT 'new'")
+        else:
+            # Migrate existing 'open' -> 'new', 'closed' -> 'resolved' for backward compatibility
+            cur.execute(
+                "UPDATE alert_history SET lifecycle_status = 'new' WHERE lifecycle_status = 'open'"
+            )
+            cur.execute(
+                "UPDATE alert_history SET lifecycle_status = 'resolved' WHERE lifecycle_status = 'closed'"
+            )
+        if "assignee" not in history_cols:
+            cur.execute("ALTER TABLE alert_history ADD COLUMN assignee TEXT")
+        if "note" not in history_cols:
+            cur.execute("ALTER TABLE alert_history ADD COLUMN note TEXT")
+        if "updated_at" not in history_cols:
+            cur.execute("ALTER TABLE alert_history ADD COLUMN updated_at TEXT")
     
     # ============================================================================
     # Alert Rules
@@ -453,8 +476,9 @@ class AlertManager:
                     """
                     INSERT INTO alert_history
                     (id, rule_id, triggered_at, event_id, event_ids, group_key, action_type,
-                     action_status, action_executed_at, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     action_status, action_executed_at, error_message, lifecycle_status,
+                     assignee, note, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.id,
@@ -467,6 +491,10 @@ class AlertManager:
                         record.action_status.value,
                         record.action_executed_at,
                         record.error_message,
+                        record.lifecycle_status.value,
+                        record.assignee,
+                        record.note,
+                        record.updated_at,
                     )
                 )
                 
@@ -494,7 +522,8 @@ class AlertManager:
                 """
                 SELECT id, rule_id, triggered_at, event_id, event_ids, group_key,
                      action_type,
-                      action_status, action_executed_at, error_message
+                     action_status, action_executed_at, error_message,
+                     lifecycle_status, assignee, note, updated_at
                 FROM alert_history
                 WHERE rule_id = ?
                 ORDER BY triggered_at DESC
@@ -504,6 +533,283 @@ class AlertManager:
             )
             
             return [self._history_row_to_record(row) for row in cur.fetchall()]
+
+    def get_recent_history(self, limit: int = 200, open_only: bool = False) -> List[dict]:
+        """Get recent triggered alerts across all rules for dashboard views."""
+        with self._lock:
+            cur = self.conn.cursor()
+            query = """
+                SELECT h.id, h.rule_id, r.name, r.severity, h.triggered_at, h.action_status,
+                       h.lifecycle_status, h.assignee, h.note, h.group_key, h.event_id,
+                       h.error_message, h.updated_at
+                FROM alert_history h
+                JOIN alert_rules r ON r.id = h.rule_id
+            """
+            params = []
+            if open_only:
+                query += " WHERE h.lifecycle_status != 'closed'"
+            query += " ORDER BY h.triggered_at DESC LIMIT ?"
+            params.append(limit)
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+
+            result = []
+            for row in rows:
+                result.append({
+                    "id": row[0],
+                    "rule_id": row[1],
+                    "rule_name": row[2],
+                    "severity": row[3],
+                    "triggered_at": row[4],
+                    "action_status": row[5],
+                    "lifecycle_status": row[6] or "new",
+                    "assignee": row[7] or "",
+                    "note": row[8] or "",
+                    "group_key": row[9] or "",
+                    "event_id": row[10] or "",
+                    "error_message": row[11] or "",
+                    "updated_at": row[12] or "",
+                })
+            return result
+
+    def get_alert_overview(self) -> dict:
+        """Get alert overview statistics across all alert history."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) as critical,
+                    SUM(CASE WHEN severity = 'high' THEN 1 ELSE 0 END) as high,
+                    SUM(CASE WHEN severity = 'medium' THEN 1 ELSE 0 END) as medium,
+                    SUM(CASE WHEN severity = 'low' THEN 1 ELSE 0 END) as low,
+                    SUM(CASE WHEN lifecycle_status = 'new' THEN 1 ELSE 0 END) as new,
+                    SUM(CASE WHEN lifecycle_status = 'acknowledged' THEN 1 ELSE 0 END) as acknowledged,
+                    SUM(CASE WHEN lifecycle_status = 'investigating' THEN 1 ELSE 0 END) as investigating,
+                    SUM(CASE WHEN lifecycle_status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+                    SUM(CASE WHEN lifecycle_status = 'false_positive' THEN 1 ELSE 0 END) as false_positive
+                FROM alert_history h
+                JOIN alert_rules r ON r.id = h.rule_id
+            """)
+            row = cur.fetchone()
+            return {
+                "total": row[0] or 0,
+                "critical": row[1] or 0,
+                "high": row[2] or 0,
+                "medium": row[3] or 0,
+                "low": row[4] or 0,
+                "new": row[5] or 0,
+                "acknowledged": row[6] or 0,
+                "investigating": row[7] or 0,
+                "resolved": row[8] or 0,
+                "false_positive": row[9] or 0,
+            }
+    
+    def get_alerts(
+        self,
+        rule_id: Optional[str] = None,
+        severity: Optional[str] = None,
+        status: Optional[str] = None,
+        group_key: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[dict]:
+        """Get alerts with filtering and pagination.
+        
+        Args:
+            rule_id: Filter by rule ID
+            severity: Filter by severity (critical, high, medium, low)
+            status: Filter by lifecycle_status (new, acknowledged, investigating, resolved, false_positive)
+            group_key: Filter by group_key
+            limit: Maximum records to return
+            offset: Starting record offset
+            
+        Returns:
+            List of alert dicts with associated rule data including MITRE technique
+        """
+        from . import AlertRule, AlertSeverity
+        
+        with self._lock:
+            cur = self.conn.cursor()
+            query = """
+                SELECT 
+                    h.id, h.rule_id, r.name as rule_name, r.severity as rule_severity, 
+                    h.triggered_at, h.action_status,
+                    h.lifecycle_status, h.assignee, h.note, h.group_key, h.event_id,
+                    h.error_message, h.updated_at
+                FROM alert_history h
+                JOIN alert_rules r ON r.id = h.rule_id
+                WHERE 1=1
+            """
+            params = []
+            
+            if rule_id:
+                query += " AND h.rule_id = ?"
+                params.append(rule_id)
+            
+            if severity:
+                query += " AND r.severity = ?"
+                params.append(severity)
+            
+            if status:
+                query += " AND h.lifecycle_status = ?"
+                params.append(status)
+            
+            if group_key:
+                query += " AND h.group_key = ?"
+                params.append(group_key)
+            
+            query += " ORDER BY h.triggered_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            # Extract MITRE technique from rule's generated_kql
+            mitre_map = {
+                "T1059": "T1059.001",
+                "T1027": "T1027",
+                "T1110": "T1110",
+                "T1059.001": "T1059.001",
+                "T1048": "T1048",
+                "T1033": "T1033",
+                "T1078": "T1078",
+                "T1078.004": "T1078.004",
+                "T1059.005": "T1059.005",
+                "T1566": "T1566",
+                "T1021": "T1021",
+                "T1040": "T1040",
+                "T1071": "T1071",
+                "T1095": "T1095",
+                "T1203": "T1203",
+                "T1499": "T1499",
+            }
+            
+            result = []
+            for row, rule_row in zip(rows, [None] * len(rows)):
+                # Get the rule for MITRE extraction
+                rule = None
+                if row[1]:  # rule_id
+                    rule = self.get_rule(row[1])
+                
+                mitre_technique = ""
+                if rule and rule.generated_kql:
+                    kql = rule.generated_kql.lower()
+                    for mitre_pattern, mitre_id in mitre_map.items():
+                        if mitre_pattern.lower() in kql:
+                            mitre_technique = mitre_id
+                            break
+                
+                result.append({
+                    "id": row[0],
+                    "rule_id": row[1],
+                    "rule_name": row[2],
+                    "severity": row[3] or "",
+                    "triggered_at": row[4],
+                    "action_status": row[5],
+                    "lifecycle_status": row[6] or "new",
+                    "assignee": row[7] or "",
+                    "note": row[8] or "",
+                    "group_key": row[9] or "",
+                    "event_id": row[10] or "",
+                    "error_message": row[11] or "",
+                    "updated_at": row[12] or "",
+                    "mitre_technique": mitre_technique,
+                    "source_ip": "",
+                    "destination_ip": "",
+                    "hostname": "",
+                    "user": "",
+                })
+            return result
+    
+    def count_alerts(
+        self,
+        rule_id: Optional[str] = None,
+        severity: Optional[str] = None,
+        status: Optional[str] = None,
+        group_key: Optional[str] = None,
+    ) -> int:
+        """Count alerts matching the given filters."""
+        with self._lock:
+            cur = self.conn.cursor()
+            query = """
+                SELECT COUNT(*)
+                FROM alert_history h
+                JOIN alert_rules r ON r.id = h.rule_id
+                WHERE 1=1
+            """
+            params = []
+            
+            if rule_id:
+                query += " AND h.rule_id = ?"
+                params.append(rule_id)
+            
+            if severity:
+                query += " AND r.severity = ?"
+                params.append(severity)
+            
+            if status:
+                query += " AND h.lifecycle_status = ?"
+                params.append(status)
+            
+            if group_key:
+                query += " AND h.group_key = ?"
+                params.append(group_key)
+            
+            cur.execute(query, params)
+            return cur.fetchone()[0]
+    
+    def update_alert_status(self, alert_id: str, lifecycle_status: AlertLifecycleStatus, assignee: Optional[str] = None, note: Optional[str] = None) -> None:
+        """Update the lifecycle status and optional assignee/note of an alert."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                UPDATE alert_history
+                SET lifecycle_status = ?,
+                    assignee = COALESCE(?, assignee),
+                    note = COALESCE(?, note),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    lifecycle_status.value,
+                    assignee,
+                    note,
+                    datetime.utcnow().isoformat(),
+                    alert_id,
+                ),
+            )
+            self.conn.commit()
+
+    def update_history_lifecycle(
+        self,
+        history_id: str,
+        lifecycle_status: AlertLifecycleStatus,
+        assignee: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        """Update lifecycle state for a triggered alert record."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                UPDATE alert_history
+                SET lifecycle_status = ?,
+                    assignee = COALESCE(?, assignee),
+                    note = COALESCE(?, note),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    lifecycle_status.value,
+                    assignee,
+                    note,
+                    datetime.utcnow().isoformat(),
+                    history_id,
+                ),
+            )
+            self.conn.commit()
     
     # ============================================================================
     # Helpers
@@ -544,7 +850,7 @@ class AlertManager:
     
     def _history_row_to_record(self, row) -> AlertHistoryRecord:
         """Convert a database row to AlertHistoryRecord."""
-        from . import AlertHistoryRecord, ActionType, ActionStatus
+        from . import AlertHistoryRecord, ActionType, ActionStatus, AlertLifecycleStatus
         
         event_id = row[3]
         if isinstance(event_id, str):
@@ -572,6 +878,10 @@ class AlertManager:
             action_status=ActionStatus(row[7]) if row[7] else ActionStatus.PENDING,
             action_executed_at=row[8],
             error_message=row[9],
+            lifecycle_status=AlertLifecycleStatus(row[10] or "new"),
+            assignee=row[11],
+            note=row[12],
+            updated_at=row[13],
         )
 
 
