@@ -85,3 +85,38 @@ Sigma mapping config:
 Server IP localhost toggle:
 
 - In the main UI Settings panel, the localhost checkbox sets Server IP to 127.0.0.1.
+
+Universal installer:
+
+- Unified installer framework under installer/ with OS-specific service adapters for Windows/Linux/macOS.
+- Cross-platform CLI entrypoint: ./cyberion-agent
+- Dedicated server installer entrypoint: ./cyberion-server
+- Subcommands:
+	- ./cyberion-agent install
+	- ./cyberion-agent upgrade
+	- ./cyberion-agent repair
+	- ./cyberion-agent uninstall
+	- ./cyberion-agent start
+	- ./cyberion-agent stop
+	- ./cyberion-agent restart
+	- ./cyberion-agent status
+	- ./cyberion-agent version
+	- ./cyberion-agent diagnostics
+
+Silent install example:
+
+- ./cyberion-agent install --silent --server https://server.example.com --token XXXXX --name HOST-001
+
+Server install example:
+
+- ./cyberion-server install --silent
+
+Installer and uninstaller docs:
+
+- docs/INSTALLER.md
+- docs/UNINSTALLER.md
+
+Packaging scripts:
+
+- scripts/build_installer_packages.sh
+- scripts/build_installer_packages.ps1

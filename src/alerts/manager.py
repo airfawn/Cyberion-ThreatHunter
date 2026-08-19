@@ -43,6 +43,9 @@ class AlertManager:
                     description     TEXT,
                     enabled         INTEGER DEFAULT 1,
                     severity        TEXT,
+                    detection_type  TEXT DEFAULT 'single_event',
+                    threshold_config TEXT,
+                    creator_name    TEXT,
                     query_definition TEXT NOT NULL,
                     generated_kql   TEXT NOT NULL,
                     action_type     TEXT,
@@ -77,6 +80,8 @@ class AlertManager:
                     rule_id            TEXT NOT NULL,
                     triggered_at       TEXT,
                     event_id           TEXT,
+                    event_ids          TEXT,
+                    group_key          TEXT,
                     action_type        TEXT,
                     action_status      TEXT,
                     action_executed_at TEXT,
@@ -95,8 +100,28 @@ class AlertManager:
                 "CREATE INDEX IF NOT EXISTS idx_alert_history_triggered "
                 "ON alert_history(triggered_at)"
             )
+
+            self._migrate_schema(cur)
             
             self.conn.commit()
+
+    def _migrate_schema(self, cur) -> None:
+        """Add new columns when upgrading existing databases."""
+        cur.execute("PRAGMA table_info(alert_rules)")
+        rule_cols = {row[1] for row in cur.fetchall()}
+        if "detection_type" not in rule_cols:
+            cur.execute("ALTER TABLE alert_rules ADD COLUMN detection_type TEXT DEFAULT 'single_event'")
+        if "threshold_config" not in rule_cols:
+            cur.execute("ALTER TABLE alert_rules ADD COLUMN threshold_config TEXT")
+        if "creator_name" not in rule_cols:
+            cur.execute("ALTER TABLE alert_rules ADD COLUMN creator_name TEXT")
+
+        cur.execute("PRAGMA table_info(alert_history)")
+        history_cols = {row[1] for row in cur.fetchall()}
+        if "event_ids" not in history_cols:
+            cur.execute("ALTER TABLE alert_history ADD COLUMN event_ids TEXT")
+        if "group_key" not in history_cols:
+            cur.execute("ALTER TABLE alert_history ADD COLUMN group_key TEXT")
     
     # ============================================================================
     # Alert Rules
@@ -122,9 +147,9 @@ class AlertManager:
                 cur.execute(
                     """
                     INSERT INTO alert_rules 
-                    (id, name, description, enabled, severity, query_definition, 
+                    (id, name, description, enabled, severity, detection_type, threshold_config, creator_name, query_definition, 
                      generated_kql, action_type, action_config, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         rule.id,
@@ -132,6 +157,9 @@ class AlertManager:
                         rule.description,
                         1 if rule.enabled else 0,
                         rule.severity.value,
+                        rule.detection_type.value,
+                        json.dumps(rule.threshold.to_dict()) if rule.threshold else None,
+                        (rule.creator_name or "unknown"),
                         json.dumps(rule.query_definition.to_dict()),
                         rule.generated_kql,
                         rule.action.action_type.value,
@@ -168,8 +196,9 @@ class AlertManager:
             cur = self.conn.cursor()
             cur.execute(
                 """
-                SELECT id, name, description, enabled, severity, query_definition,
-                       generated_kql, action_type, action_config, created_at, updated_at
+                  SELECT id, name, description, enabled, severity,
+                      detection_type, threshold_config, creator_name, query_definition,
+                      generated_kql, action_type, action_config, created_at, updated_at
                 FROM alert_rules
                 WHERE id = ?
                 """,
@@ -197,8 +226,9 @@ class AlertManager:
             if enabled_only:
                 cur.execute(
                     """
-                    SELECT id, name, description, enabled, severity, query_definition,
-                           generated_kql, action_type, action_config, created_at, updated_at
+                    SELECT id, name, description, enabled, severity,
+                           detection_type, threshold_config, creator_name, query_definition,
+                              generated_kql, action_type, action_config, created_at, updated_at
                     FROM alert_rules
                     WHERE enabled = 1
                     ORDER BY created_at DESC
@@ -207,8 +237,9 @@ class AlertManager:
             else:
                 cur.execute(
                     """
-                    SELECT id, name, description, enabled, severity, query_definition,
-                           generated_kql, action_type, action_config, created_at, updated_at
+                    SELECT id, name, description, enabled, severity,
+                           detection_type, threshold_config, creator_name, query_definition,
+                              generated_kql, action_type, action_config, created_at, updated_at
                     FROM alert_rules
                     ORDER BY created_at DESC
                     """
@@ -233,8 +264,8 @@ class AlertManager:
                 cur.execute(
                     """
                     UPDATE alert_rules
-                    SET name = ?, description = ?, enabled = ?, severity = ?,
-                        query_definition = ?, generated_kql = ?, action_type = ?,
+                    SET name = ?, description = ?, enabled = ?, severity = ?, detection_type = ?,
+                        threshold_config = ?, creator_name = ?, query_definition = ?, generated_kql = ?, action_type = ?,
                         action_config = ?, updated_at = ?
                     WHERE id = ?
                     """,
@@ -243,6 +274,9 @@ class AlertManager:
                         rule.description,
                         1 if rule.enabled else 0,
                         rule.severity.value,
+                        rule.detection_type.value,
+                        json.dumps(rule.threshold.to_dict()) if rule.threshold else None,
+                        (rule.creator_name or "unknown"),
                         json.dumps(rule.query_definition.to_dict()),
                         rule.generated_kql,
                         rule.action.action_type.value,
@@ -418,15 +452,17 @@ class AlertManager:
                 cur.execute(
                     """
                     INSERT INTO alert_history
-                    (id, rule_id, triggered_at, event_id, action_type,
+                    (id, rule_id, triggered_at, event_id, event_ids, group_key, action_type,
                      action_status, action_executed_at, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.id,
                         record.rule_id,
                         record.triggered_at,
                         record.event_id,
+                        json.dumps(record.event_ids or []),
+                        record.group_key,
                         record.action_type.value,
                         record.action_status.value,
                         record.action_executed_at,
@@ -456,8 +492,9 @@ class AlertManager:
             cur = self.conn.cursor()
             cur.execute(
                 """
-                SELECT id, rule_id, triggered_at, event_id, action_type,
-                       action_status, action_executed_at, error_message
+                SELECT id, rule_id, triggered_at, event_id, event_ids, group_key,
+                     action_type,
+                      action_status, action_executed_at, error_message
                 FROM alert_history
                 WHERE rule_id = ?
                 ORDER BY triggered_at DESC
@@ -474,15 +511,18 @@ class AlertManager:
     
     def _row_to_rule(self, row) -> AlertRule:
         """Convert a database row to AlertRule."""
-        from . import AlertRule, ActionConfig, ActionType, AlertSeverity
+        from . import AlertRule, ActionConfig, ActionType, AlertSeverity, DetectionType, ThresholdConfig
         from ..query.query_model import QueryDefinition
         
-        query_def_dict = json.loads(row[5]) if row[5] else {}
+        query_def_dict = json.loads(row[8]) if row[8] else {}
         query_def = QueryDefinition.from_dict(query_def_dict)
         
-        action_config = json.loads(row[8]) if row[8] else {}
+        threshold_config = json.loads(row[6]) if row[6] else None
+        threshold = ThresholdConfig.from_dict(threshold_config) if threshold_config else None
+
+        action_config = json.loads(row[11]) if row[11] else {}
         action = ActionConfig(
-            action_type=ActionType(row[7]) if row[7] else ActionType.LOG_ALERT,
+            action_type=ActionType(row[10]) if row[10] else ActionType.LOG_ALERT,
             config=action_config
         )
         
@@ -492,11 +532,14 @@ class AlertManager:
             description=row[2],
             enabled=bool(row[3]),
             severity=AlertSeverity(row[4]) if row[4] else AlertSeverity.MEDIUM,
+            detection_type=DetectionType(row[5]) if row[5] else DetectionType.SINGLE_EVENT,
+            threshold=threshold,
+            creator_name=row[7] or "",
             query_definition=query_def,
-            generated_kql=row[6],
+            generated_kql=row[9],
             action=action,
-            created_at=row[9],
-            updated_at=row[10],
+            created_at=row[12],
+            updated_at=row[13],
         )
     
     def _history_row_to_record(self, row) -> AlertHistoryRecord:
@@ -509,15 +552,26 @@ class AlertManager:
                 event_id = int(event_id)
             except ValueError:
                 pass
+
+        event_ids = []
+        if row[4]:
+            try:
+                raw_ids = json.loads(row[4])
+                if isinstance(raw_ids, list):
+                    event_ids = [int(v) for v in raw_ids if isinstance(v, (int, float, str)) and str(v).isdigit()]
+            except Exception:
+                event_ids = []
         return AlertHistoryRecord(
             id=row[0],
             rule_id=row[1],
             triggered_at=row[2],
             event_id=event_id,
-            action_type=ActionType(row[4]) if row[4] else ActionType.LOG_ALERT,
-            action_status=ActionStatus(row[5]) if row[5] else ActionStatus.PENDING,
-            action_executed_at=row[6],
-            error_message=row[7],
+            event_ids=event_ids,
+            group_key=row[5],
+            action_type=ActionType(row[6]) if row[6] else ActionType.LOG_ALERT,
+            action_status=ActionStatus(row[7]) if row[7] else ActionStatus.PENDING,
+            action_executed_at=row[8],
+            error_message=row[9],
         )
 
 

@@ -36,6 +36,51 @@ class ActionStatus(Enum):
     PENDING = "pending"
 
 
+class DetectionType(Enum):
+    """Supported detection evaluation modes."""
+    SINGLE_EVENT = "single_event"
+    THRESHOLD = "threshold"
+
+
+class TimeUnit(Enum):
+    """Time units used by threshold and cooldown windows."""
+    SECONDS = "seconds"
+    MINUTES = "minutes"
+    HOURS = "hours"
+
+
+@dataclass
+class ThresholdConfig:
+    """Configuration for threshold-based detections."""
+    count: int = 1
+    window: int = 60
+    unit: TimeUnit = TimeUnit.SECONDS
+    group_by: List[str] = field(default_factory=list)
+    cooldown: int = 0
+    cooldown_unit: TimeUnit = TimeUnit.MINUTES
+
+    def to_dict(self) -> dict:
+        return {
+            "count": self.count,
+            "window": self.window,
+            "unit": self.unit.value,
+            "group_by": list(self.group_by or []),
+            "cooldown": self.cooldown,
+            "cooldown_unit": self.cooldown_unit.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ThresholdConfig":
+        return cls(
+            count=int(data.get("count", 1)),
+            window=int(data.get("window", 60)),
+            unit=TimeUnit(data.get("unit", "seconds")),
+            group_by=list(data.get("group_by", []) or []),
+            cooldown=int(data.get("cooldown", 0)),
+            cooldown_unit=TimeUnit(data.get("cooldown_unit", "minutes")),
+        )
+
+
 @dataclass
 class ActionConfig:
     """Configuration for an alert action."""
@@ -66,6 +111,9 @@ class AlertRule:
     description: str = ""
     enabled: bool = True
     severity: AlertSeverity = AlertSeverity.MEDIUM
+    detection_type: DetectionType = DetectionType.SINGLE_EVENT
+    threshold: Optional[ThresholdConfig] = None
+    creator_name: str = ""
     query_definition: QueryDefinition = field(default_factory=QueryDefinition.empty)
     generated_kql: str = ""
     action: ActionConfig = field(default_factory=lambda: ActionConfig(ActionType.LOG_ALERT))
@@ -80,6 +128,9 @@ class AlertRule:
             "description": self.description,
             "enabled": self.enabled,
             "severity": self.severity.value,
+            "detection_type": self.detection_type.value,
+            "threshold": self.threshold.to_dict() if self.threshold else None,
+            "creator_name": self.creator_name,
             "generated_kql": self.generated_kql,
             "action": self.action.to_dict(),
             "created_at": self.created_at,
@@ -96,6 +147,9 @@ class AlertRule:
             description=data.get("description", ""),
             enabled=data.get("enabled", True),
             severity=AlertSeverity(data.get("severity", "medium")),
+            detection_type=DetectionType(data.get("detection_type", "single_event")),
+            threshold=ThresholdConfig.from_dict(data["threshold"]) if data.get("threshold") else None,
+            creator_name=data.get("creator_name", ""),
             generated_kql=data.get("generated_kql", ""),
             action=ActionConfig.from_dict(data.get("action", {"action_type": "log_alert"})),
             created_at=data.get("created_at", datetime.utcnow().isoformat()),
@@ -154,6 +208,8 @@ class AlertHistoryRecord:
     rule_id: str = ""
     triggered_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     event_id: Optional[str] = None  # ID of event that matched
+    event_ids: List[int] = field(default_factory=list)  # IDs for threshold-triggering events
+    group_key: Optional[str] = None
     action_type: ActionType = ActionType.LOG_ALERT
     action_status: ActionStatus = ActionStatus.PENDING
     action_executed_at: Optional[str] = None
@@ -166,6 +222,8 @@ class AlertHistoryRecord:
             "rule_id": self.rule_id,
             "triggered_at": self.triggered_at,
             "event_id": self.event_id,
+            "event_ids": list(self.event_ids),
+            "group_key": self.group_key,
             "action_type": self.action_type.value,
             "action_status": self.action_status.value,
             "action_executed_at": self.action_executed_at,
@@ -180,6 +238,8 @@ class AlertHistoryRecord:
             rule_id=data.get("rule_id", ""),
             triggered_at=data.get("triggered_at", datetime.utcnow().isoformat()),
             event_id=data.get("event_id"),
+            event_ids=list(data.get("event_ids", []) or []),
+            group_key=data.get("group_key"),
             action_type=ActionType(data.get("action_type", "log_alert")),
             action_status=ActionStatus(data.get("action_status", "pending")),
             action_executed_at=data.get("action_executed_at"),
@@ -193,6 +253,9 @@ __all__ = [
     "ActionType",
     "ActionConfig",
     "ActionStatus",
+    "DetectionType",
+    "TimeUnit",
+    "ThresholdConfig",
     "AlertStatistics",
     "AlertHistoryRecord",
 ]

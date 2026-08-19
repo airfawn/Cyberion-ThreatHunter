@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from installer.server_cli import run
+
+raise SystemExit(run())

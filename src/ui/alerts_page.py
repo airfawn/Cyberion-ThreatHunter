@@ -242,12 +242,14 @@ class AlertsPage(QWidget):
         result = editor.exec()
         
         if result == editor.Accepted:
-            rule = editor.get_rule()
             try:
+                rule = editor.get_rule()
                 created = self.alert_manager.create_rule(rule)
                 self.rule_created.emit(created)
                 self._refresh_data()
                 logger.info(f"Created alert rule: {created.name}")
+            except ValueError as e:
+                QMessageBox.warning(self, "Validation", str(e))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to create rule: {e}")
     
@@ -314,12 +316,14 @@ class AlertsPage(QWidget):
         result = editor.exec()
         
         if result == editor.Accepted:
-            updated = editor.get_rule()
             try:
+                updated = editor.get_rule()
                 self.alert_manager.update_rule(updated)
                 self.rule_updated.emit(updated)
                 self._refresh_data()
                 logger.info(f"Updated alert rule: {updated.name}")
+            except ValueError as e:
+                QMessageBox.warning(self, "Validation", str(e))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to update rule: {e}")
     

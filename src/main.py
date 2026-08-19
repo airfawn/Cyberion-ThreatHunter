@@ -11,6 +11,10 @@ import threading
 import time
 from pathlib import Path
 
+APP_ROOT = Path(__file__).resolve().parent.parent
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
 from PyQt5.QtCore import QEasingCurve, QObject, QPropertyAnimation, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
@@ -200,6 +204,13 @@ def _get_env_int(name: str, default: int) -> int:
     return value
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_runtime_network_config() -> tuple[str, int, str, int]:
     bind_host = os.getenv("THREATHUNTER_BIND_HOST", "0.0.0.0")
     port = _get_env_int("THREATHUNTER_PORT", 9090)
@@ -215,6 +226,7 @@ class MainWindow(QMainWindow):
         port: int = 9090,
         aux_host: str = "127.0.0.1",
         aux_port: int = 12345,
+        attach_mode: bool = False,
         *args,
         **kwargs,
     ):
@@ -228,6 +240,7 @@ class MainWindow(QMainWindow):
         self.server_port = port
         self.aux_host = aux_host
         self.aux_port = aux_port
+        self.attach_mode = attach_mode
         self.current_status = "Waiting for connection"
 
         self.available_fields = [
@@ -283,24 +296,32 @@ class MainWindow(QMainWindow):
         self.socket_server_stop = threading.Event()
         self.socket_accept_thread = None
         self.server_socket = None
+        self.server_thread: ServerThread | None = None
+        self._last_db_event_count = -1
 
         self._build_ui()
         self._apply_styles()
 
         self.status_signal = AgentStatusSignal()
         self.status_signal.status_changed.connect(self._on_status_change)
-        self.server_thread = ServerThread(
-            self.server_host,
-            self.server_port,
-            self.persist_queue,
-            status_callback=self.status_signal.status_changed.emit,
-        )
-        self.server_thread.start()
-        self.persistence_worker.start()
+        if self.attach_mode:
+            self._set_attach_mode_status()
+        else:
+            self.server_thread = ServerThread(
+                self.server_host,
+                self.server_port,
+                self.persist_queue,
+                status_callback=self.status_signal.status_changed.emit,
+            )
+            self.server_thread.start()
+            self.persistence_worker.start()
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(200)
-        self.poll_timer.timeout.connect(self._poll_queue)
+        if self.attach_mode:
+            self.poll_timer.timeout.connect(self._poll_db_attach_mode)
+        else:
+            self.poll_timer.timeout.connect(self._poll_queue)
         self.poll_timer.start()
 
         self.socket_poll_timer = QTimer(self)
@@ -685,16 +706,23 @@ class MainWindow(QMainWindow):
         saved["aux_host"] = self.aux_host
         saved["aux_port"] = self.aux_port
         self._write_settings(saved)
-
-        self._restart_server_thread()
-        self.settings_feedback_lbl.setText(
-            f"Saved. Server listening on {self.server_host}:{self.server_port}."
-        )
+        if self.attach_mode:
+            self.settings_feedback_lbl.setText(
+                f"Saved. Restart the server service to apply {self.server_host}:{self.server_port}."
+            )
+        else:
+            self._restart_server_thread()
+            self.settings_feedback_lbl.setText(
+                f"Saved. Server listening on {self.server_host}:{self.server_port}."
+            )
 
     def _restart_server_thread(self):
+        if self.attach_mode:
+            return
         try:
-            self.server_thread.stop()
-            self.server_thread.join(timeout=1)
+            if self.server_thread is not None:
+                self.server_thread.stop()
+                self.server_thread.join(timeout=1)
         except Exception:
             pass
 
@@ -705,6 +733,23 @@ class MainWindow(QMainWindow):
             status_callback=self.status_signal.status_changed.emit,
         )
         self.server_thread.start()
+
+    def _set_attach_mode_status(self):
+        text = "Connected (service ingestion)"
+        self.current_status = text
+        self.side_agent_status_lbl.setText(f"● {text}")
+        self.agent_status_lbl.setText(f"Agent Status: {text}")
+
+    def _poll_db_attach_mode(self):
+        try:
+            current_count = self.event_repo.event_count()
+        except Exception:
+            return
+
+        if current_count == self._last_db_event_count:
+            return
+        self._last_db_event_count = current_count
+        self._load_events_from_db()
 
     def _normalize_event(
         self,
@@ -1313,14 +1358,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.server_thread.stop()
-            self.server_thread.join(timeout=1)
+            if self.server_thread is not None:
+                self.server_thread.stop()
+                self.server_thread.join(timeout=1)
         except Exception:
             pass
         try:
             # Stop the persistence worker after the server so any queued
             # events are drained and flushed before the DB is closed.
-            self.persistence_worker.stop()
+            if not self.attach_mode:
+                self.persistence_worker.stop()
         except Exception:
             pass
         try:
@@ -1350,7 +1397,11 @@ if __name__ == "__main__":
         f"and auxiliary listener on {aux_host}:{aux_port}"
     )
 
+    attach_mode = _env_flag("THREATHUNTER_GUI_ATTACH_MODE", default=False)
+    if attach_mode:
+        print("Running UI in attach mode (ingestion is handled by background server service)")
+
     app = QApplication(sys.argv)
-    win = MainWindow(host=bind_host, port=port, aux_host=aux_host, aux_port=aux_port)
+    win = MainWindow(host=bind_host, port=port, aux_host=aux_host, aux_port=aux_port, attach_mode=attach_mode)
     win.show()
     sys.exit(app.exec_())

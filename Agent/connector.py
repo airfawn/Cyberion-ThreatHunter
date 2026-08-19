@@ -11,13 +11,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+APP_ROOT = Path(__file__).resolve().parent.parent
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
 try:
     import yaml  # type: ignore
 except ImportError:  # pragma: no cover
     yaml = None
 
-from .collector import Collector, detect_runtime_platform, gather_initial_data
-from .log_queue import LogQueue, LogSender, LogEntry
+try:
+    from .collector import Collector, detect_runtime_platform, gather_initial_data
+    from .log_queue import LogQueue, LogSender, LogEntry
+except ImportError:
+    from Agent.collector import Collector, detect_runtime_platform, gather_initial_data
+    from Agent.log_queue import LogQueue, LogSender, LogEntry
 
 
 def _get_env_int(name: str, default: int) -> int:

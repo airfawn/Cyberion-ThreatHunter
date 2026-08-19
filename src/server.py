@@ -83,6 +83,12 @@ class ServerThread(threading.Thread):
     def _handle_line(self, line: str, conn):
         if not line:
             return
+
+        # Allow browser/HTTP health probes on the same port without hanging.
+        # The agent protocol remains newline-delimited JSON.
+        if self._respond_if_http_probe(line, conn):
+            return
+
         try:
             msg = json.loads(line)
             msg_type = msg.get("type", "EVENT")
@@ -147,6 +153,31 @@ class ServerThread(threading.Thread):
 
         except json.JSONDecodeError:
             pass
+
+    def _respond_if_http_probe(self, line: str, conn) -> bool:
+        first = line.upper()
+        if not (first.startswith("GET ") or first.startswith("HEAD ")):
+            return False
+
+        body = (
+            "{\"service\":\"cyberion-server\","
+            "\"protocol\":\"tcp-json-lines\","
+            "\"status\":\"ok\"}"
+        )
+        response = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            f"{body}"
+        )
+        try:
+            conn.sendall(response.encode("utf-8"))
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        return True
 
     def _is_duplicate(self, log_id: str) -> bool:
         """Return True if log_id was already processed (retransmission)."""

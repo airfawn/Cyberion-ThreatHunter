@@ -227,6 +227,7 @@ class SigmaRuleConverter:
             description=description,
             enabled=True,
             severity=severity,
+            creator_name="Sigma Importer",
             query_definition=query_def,
             generated_kql=generated_kql,
             action=ActionConfig(ActionType.LOG_ALERT, {"sigma_metadata": sigma_meta_payload}),
